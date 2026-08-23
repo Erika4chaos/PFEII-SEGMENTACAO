@@ -24,6 +24,13 @@ DADOS_DIR = RAIZ / "data" / "processed"
 
 TIPO_SINISTRO_LABEL = {0: "nenhum identificado", 1: "tombamento", 2: "incendio", 3: "terceiros"}
 
+# Paleta categorica (magenta/azul/verde) validada com scripts/validate_palette.py
+# da skill dataviz para 3 series em grafico de dispersao (checagem --pairs all,
+# light e dark): todos os checks passam, com WARN de contraste no slot magenta/
+# verde mitigado pela legenda + tooltip + tabela de perfis ja presentes na pagina.
+CORES_CLUSTER = ["#e87ba4", "#2a78d6", "#008300"]
+COR_LINHA_DESTAQUE = "#c2185b"
+
 
 def _fmt_brl(valor: float) -> str:
     return f"R$ {valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
@@ -87,8 +94,39 @@ def calcular_indices_validacao(normalizada: pd.DataFrame) -> dict:
     }
 
 
+def aplicar_estilo():
+    st.markdown(
+        """
+        <style>
+        h1 {
+            color: #c2185b;
+            border-bottom: 3px solid #e87ba4;
+            padding-bottom: 0.3rem;
+        }
+        h2 {
+            color: #ad1457;
+            border-bottom: 2px solid #f5c2d8;
+            padding-bottom: 0.2rem;
+            margin-top: 2rem;
+        }
+        h3 { color: #ad1457; }
+        [data-testid="stMetric"] {
+            background-color: #fff0f5;
+            border: 1px solid #f5c2d8;
+            border-radius: 12px;
+            padding: 12px 14px 8px 14px;
+        }
+        [data-testid="stMetricLabel"] { color: #a8375f; }
+        [data-testid="stMetricValue"] { color: #c2185b; }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def main():
     st.set_page_config(page_title="Segmentacao RCT", layout="wide")
+    aplicar_estilo()
     st.title("Segmentacao de Transportadoras - Produto RCT")
     st.caption(
         "Dashboard de visualizacao e validacao dos resultados da segmentacao por K-Means "
@@ -129,10 +167,14 @@ def main():
     projecao["cluster"] = projecao["cluster"].astype(str)
     st.caption(f"Variancia explicada pelos dois primeiros componentes: {variancia_pct:.1%}")
 
-    grafico = alt.Chart(projecao).mark_circle(size=70, opacity=0.7).encode(
+    ordem_clusters = sorted(projecao["cluster"].unique())
+    grafico = alt.Chart(projecao).mark_circle(size=70, opacity=0.75).encode(
         x=alt.X("PCA1", title="Componente Principal 1"),
         y=alt.Y("PCA2", title="Componente Principal 2"),
-        color=alt.Color("cluster:N", title="Cluster"),
+        color=alt.Color(
+            "cluster:N", title="Cluster",
+            scale=alt.Scale(domain=ordem_clusters, range=CORES_CLUSTER[: len(ordem_clusters)]),
+        ),
         tooltip=["numeroApolice", "cluster", "classe_risco", "premio_por_veiculo",
                  "valor_pago_historico", "referral_pendente", "tempo_cotacao_emissao"],
     ).interactive().properties(height=450)
@@ -167,13 +209,17 @@ def main():
         st.subheader("Metodo do Cotovelo e Indice de Silhouette por k (k=2..8)")
         col_a, col_b = st.columns(2)
         with col_a:
-            grafico_cotovelo = alt.Chart(validacao_k).mark_line(point=True).encode(
+            grafico_cotovelo = alt.Chart(validacao_k).mark_line(
+                point=alt.OverlayMarkDef(color=COR_LINHA_DESTAQUE), color=COR_LINHA_DESTAQUE
+            ).encode(
                 x=alt.X("k:O", title="Numero de clusters (k)"),
                 y=alt.Y("inercia", title="Inercia (WCSS)"),
             ).properties(height=300)
             st.altair_chart(grafico_cotovelo, width="stretch")
         with col_b:
-            grafico_silhouette = alt.Chart(validacao_k).mark_line(point=True, color="orange").encode(
+            grafico_silhouette = alt.Chart(validacao_k).mark_line(
+                point=alt.OverlayMarkDef(color=COR_LINHA_DESTAQUE), color=COR_LINHA_DESTAQUE
+            ).encode(
                 x=alt.X("k:O", title="Numero de clusters (k)"),
                 y=alt.Y("silhouette", title="Indice de Silhouette"),
             ).properties(height=300)
