@@ -1,7 +1,9 @@
 """
-Etapa 4 (Secao 3.5.4): dashboard Streamlit com projecao PCA 2D dos clusters,
-tabela de perfis, KPIs por segmento e indices de validacao tecnica
-(Silhouette, Davies-Bouldin, Calinski-Harabasz).
+Etapa 4 (Secao 3.5.4): dashboard Streamlit com tres abas -- Segmentacao
+(projecao PCA 2D dos clusters, tabela de perfis, KPIs e indices de validacao
+tecnica), Validacao de Hardware (discriminacao do limiar de ~6 m/s^2 do
+firmware contra os datasets publicos de conducao) e Coligacao Conceitual
+(passeio ilustrativo perfil x evento de hardware, sem juncao real de dados).
 
 Uso:
     streamlit run dashboard/app.py
@@ -41,22 +43,18 @@ NOME_PERFIL = {
 CORES_PERFIL = {1: "#e87ba4", 2: "#2a78d6", 3: "#008300"}
 COR_LINHA_DESTAQUE = "#c2185b"
 
-# Rotulos comportamentais do UAH-DriveSet (src/validacao_hardware.py), usados
-# na aba de telemetria. Reaproveita as 3 cores categoricas ja validadas acima
-# (mesmos hex de CORES_PERFIL) para manter a identidade visual do dashboard;
-# "desconhecido" e um cinza neutro (nao e uma 4a categoria de dados, apenas
-# trajetos sem rotulo no caminho) e nao entrou na validacao de pares CVD.
-COMPORTAMENTO_LABEL = {
-    "normal": "Normal",
-    "agressiva": "Agressiva",
-    "sonolenta": "Sonolenta",
-    "desconhecido": "Nao identificado",
+# Nomes de citacao academica para as duas fontes publicas de validacao de
+# hardware (ver Part B.5 do escopo tecnico) -- os valores brutos de
+# SourceDataset em driver_conduct_harmonized.csv sao identificadores de
+# arquivo, nao a citacao a exibir na UI.
+FONTE_LABEL = {
+    "Yuksel_Atmaca_2020_DrivingBehaviorDataset": "Yuksel (2021)",
+    "jair_jr_driverBehaviorDataset_2016": "Ferreira Jr. et al. (2017)",
 }
-CORES_COMPORTAMENTO = {
-    "normal": "#2a78d6",
-    "agressiva": "#e87ba4",
-    "sonolenta": "#008300",
-    "desconhecido": "#8a7f97",
+CORES_FONTE = {"Yuksel (2021)": "#2a78d6", "Ferreira Jr. et al. (2017)": "#e87ba4"}
+
+CATEGORIA_LABEL = {
+    "ACCELERATION": "Aceleracao", "BRAKING": "Frenagem", "TURN": "Curva",
 }
 
 
@@ -96,24 +94,31 @@ def carregar_significancia():
 
 
 @st.cache_data
-def carregar_telemetria():
-    """Resumo por trajeto do UAH-DriveSet, gerado por
-    src/validacao_hardware.py: evidencia comportamental de referencia para a
-    camada de hardware enquanto o dispositivo ESP32 proprio nao coletou
-    viagens reais (mesmo esquema de evento: contagem, intensidade,
-    geolocalizacao)."""
-    caminho = DADOS_DIR / "validacao_hardware_uah_driveset.csv"
-    return pd.read_csv(caminho) if caminho.exists() else None
+def carregar_conduta_harmonizada():
+    """Le a saida ja harmonizada (unidades + rotulos) de
+    src/validacao_hardware.py -- o dashboard nunca reimplementa a deteccao
+    de escala g/m/s^2 nem o mapeamento de rotulos, apenas consome o CSV que
+    o script produz (ver Part B.5/A.7 do escopo tecnico)."""
+    caminho = DADOS_DIR / "driver_conduct_harmonized.csv"
+    if not caminho.exists():
+        return None
+    df = pd.read_csv(caminho)
+    df["FonteLabel"] = df["SourceDataset"].map(FONTE_LABEL).fillna(df["SourceDataset"])
+    return df
 
 
 @st.cache_data
-def carregar_conduta_combinada():
-    """Resumo por rotulo de evento de dois datasets publicos de conducao
-    (Yuksel & Atmaca, 2020; Jair Jr., 2016), classificados pelo mesmo
-    limiar de deteccao do ESP32 em src/validacao_hardware.py -- segunda
-    fonte de validacao, independente do UAH-DriveSet."""
-    caminho = DADOS_DIR / "validacao_hardware_conduta_combinada_resumo.csv"
-    return pd.read_csv(caminho) if caminho.exists() else None
+def carregar_conduta_metricas():
+    """Matriz de confusao / precisao / recall / F1 por fonte e por
+    categoria, ja calculada por src/validacao_hardware.py (Step 6b) --
+    reaproveitada aqui, nunca recalculada, para nao duplicar a logica de
+    avaliacao entre script e dashboard."""
+    caminho = DADOS_DIR / "driver_conduct_metrics.csv"
+    if not caminho.exists():
+        return None
+    df = pd.read_csv(caminho)
+    df["FonteLabel"] = df["recorte"].map(FONTE_LABEL).fillna(df["recorte"])
+    return df
 
 
 def projetar_pca(normalizada: pd.DataFrame) -> tuple[pd.DataFrame, float]:
@@ -214,17 +219,6 @@ def aplicar_estilo():
             color: #ffffff;
             border: none;
         }
-        [data-testid="stSidebar"] button[kind="secondary"] {
-            background-color: transparent;
-            border-color: transparent;
-            color: #cfc4dc;
-            text-align: left;
-            justify-content: flex-start;
-        }
-        [data-testid="stSidebar"] button[kind="secondary"]:hover {
-            background-color: #5a4a75;
-            color: #ffffff;
-        }
         .side-badge {
             background: #5a4a75;
             border-radius: 10px;
@@ -262,45 +256,32 @@ def aplicar_estilo():
             display: inline-block; padding: 3px 10px; border-radius: 999px;
             font-size: 12px; font-weight: 600; color: #ffffff;
         }
+        .no-join-banner {
+            background: #fff3cd; border: 1px solid #e8b83c; border-radius: 10px;
+            padding: 14px 16px; color: #7a5a00; font-size: 13px; line-height: 1.6;
+        }
         </style>
         """,
         unsafe_allow_html=True,
     )
 
 
-def render_sidebar() -> str:
+def render_sidebar():
     with st.sidebar:
         st.markdown(
             '<h2 style="margin-top:0;">Dashboard de <span style="color:#e87ba4;">Risco</span></h2>'
             '<div style="font-size:12px;margin-bottom:14px;">RCT Transportador</div>',
             unsafe_allow_html=True,
         )
-
-        if "view" not in st.session_state:
-            st.session_state["view"] = "Visao geral"
-
-        opcoes = [
-            "Visao geral", "Clusters (PCA)", "Validacao e insights",
-            "Telemetria (UAH-DriveSet)", "Exportar dados",
-        ]
-        for opcao in opcoes:
-            ativo = st.session_state["view"] == opcao
-            if st.button(
-                opcao, key=f"nav_{opcao.replace(' ', '_')}",
-                width="stretch", type=("primary" if ativo else "secondary"),
-            ):
-                st.session_state["view"] = opcao
-
         st.markdown(
             '<div class="side-badge"><b>Etapa 4 da metodologia.</b> '
-            'Segmentacao via K-Means (k=3) sobre 19 variaveis derivadas (Quadro 2). '
+            'Segmentacao via K-Means (k=3) sobre 19 variaveis derivadas (Quadro 2), '
+            'complementada por validacao independente da camada de hardware (Parte B). '
             'Correlacao espacial com criminalidade/vulnerabilidade e alertas de '
             'telemetria por apolice ficam registrados como extensao futura (Secao 3.8).'
             '</div>',
             unsafe_allow_html=True,
         )
-
-    return st.session_state["view"]
 
 
 def render_linha_kpis(dados: dict):
@@ -429,7 +410,7 @@ def render_view_clusters(projecao, variancia_pct):
         render_scatter(projecao, None)
 
 
-def render_view_validacao(normalizada, validacao_k, significancia):
+def render_view_validacao_indices(normalizada, validacao_k, significancia):
     indices = calcular_indices_validacao(normalizada)
     col1, col2, col3 = st.columns(3)
     col1.metric("Indice Silhouette", f"{indices['Silhouette']:.4f}")
@@ -473,227 +454,264 @@ def render_view_validacao(normalizada, validacao_k, significancia):
         st.caption("Rode src/perfilamento.py para gerar os testes de significancia.")
 
 
-def render_kpis_telemetria(telemetria: pd.DataFrame):
-    colunas = st.columns(4)
-    itens = [
-        ("Trajetos analisados", str(len(telemetria))),
-        ("Motoristas distintos", str(telemetria["motorista"].nunique())),
-        ("Eventos detectados", str(int(telemetria["n_eventos"].sum()))),
-        ("Eventos/min (media)", f"{telemetria['eventos_por_min'].mean():.2f}"),
-    ]
-    for coluna, (rotulo, valor) in zip(colunas, itens):
-        coluna.metric(rotulo, valor)
-
-
-def _ordem_e_cores_comportamento(telemetria: pd.DataFrame) -> tuple[list, list]:
-    presentes = [c for c in CORES_COMPORTAMENTO if c in telemetria["comportamento"].unique()]
-    ordem = [COMPORTAMENTO_LABEL[c] for c in presentes]
-    cores = [CORES_COMPORTAMENTO[c] for c in presentes]
-    return ordem, cores
-
-
-def render_bar_eventos_comportamento(telemetria: pd.DataFrame):
-    ordem, cores = _ordem_e_cores_comportamento(telemetria)
-    agregado = telemetria.groupby("comportamento")["eventos_por_min"].mean().reset_index()
-    agregado["comportamento_label"] = agregado["comportamento"].map(COMPORTAMENTO_LABEL)
-
-    grafico = alt.Chart(agregado).mark_bar(cornerRadiusTopLeft=6, cornerRadiusTopRight=6).encode(
-        x=alt.X("comportamento_label:N", title=None, sort=ordem, axis=alt.Axis(labelAngle=0)),
-        y=alt.Y("eventos_por_min:Q", title="Eventos por minuto (media)"),
-        color=alt.Color(
-            "comportamento_label:N", title="Rotulo comportamental",
-            scale=alt.Scale(domain=ordem, range=cores),
-        ),
-        tooltip=["comportamento_label", alt.Tooltip("eventos_por_min:Q", format=".2f")],
-    ).properties(height=280)
-    st.altair_chart(grafico, width="stretch")
-
-
-def render_box_magnitude(telemetria: pd.DataFrame):
-    ordem, cores = _ordem_e_cores_comportamento(telemetria)
-    dados = telemetria.copy()
-    dados["comportamento_label"] = dados["comportamento"].map(COMPORTAMENTO_LABEL)
-
-    grafico = alt.Chart(dados).mark_boxplot(size=36).encode(
-        x=alt.X("comportamento_label:N", title=None, sort=ordem, axis=alt.Axis(labelAngle=0)),
-        y=alt.Y("magnitude_maxima_ms2:Q", title="Magnitude maxima do trajeto (m/s^2)"),
-        color=alt.Color(
-            "comportamento_label:N",
-            scale=alt.Scale(domain=ordem, range=cores), legend=None,
-        ),
-    ).properties(height=280)
-    st.altair_chart(grafico, width="stretch")
-
-
-def render_tabela_telemetria(telemetria: pd.DataFrame):
-    tabela = telemetria[[
-        "motorista", "comportamento", "duracao_min", "n_eventos",
-        "eventos_por_min", "magnitude_media_ms2", "magnitude_maxima_ms2",
-    ]].copy()
-    tabela["comportamento"] = tabela["comportamento"].map(COMPORTAMENTO_LABEL)
-    tabela["duracao_min"] = tabela["duracao_min"].map(lambda v: f"{v:.1f}")
-    tabela["eventos_por_min"] = tabela["eventos_por_min"].map(lambda v: f"{v:.2f}")
-    tabela["magnitude_media_ms2"] = tabela["magnitude_media_ms2"].map(lambda v: f"{v:.2f}")
-    tabela["magnitude_maxima_ms2"] = tabela["magnitude_maxima_ms2"].map(lambda v: f"{v:.2f}")
-    tabela.columns = [
-        "Motorista", "Comportamento", "Duracao (min)", "Eventos",
-        "Eventos/min", "Magnitude media (m/s^2)", "Magnitude maxima (m/s^2)",
-    ]
-    st.dataframe(tabela, width="stretch", hide_index=True)
-
-
-def render_kpis_conduta(conduta: pd.DataFrame):
-    total_janelas = int(conduta["n_janelas"].sum())
-    total_detectados = int(conduta["n_detectados"].sum())
-    taxa_geral = total_detectados / total_janelas if total_janelas else float("nan")
-    n_motoristas = conduta.loc[conduta["motorista"] != "desconhecido", "motorista"].nunique()
-    colunas = st.columns(4)
-    itens = [
-        ("Janelas analisadas", str(total_janelas)),
-        ("Fontes de dados", str(conduta["fonte"].nunique())),
-        ("Motoristas identificados", str(n_motoristas)),
-        ("Taxa de deteccao geral", f"{taxa_geral:.0%}"),
-    ]
-    for coluna, (rotulo, valor) in zip(colunas, itens):
-        coluna.metric(rotulo, valor)
-
-
-def render_bar_taxa_deteccao_conduta(conduta: pd.DataFrame):
-    """Taxa de deteccao por rotulo de evento, agregada entre motoristas
-    (a mesma janela do arquivo tem uma linha por motorista dentro de cada
-    fonte -- ver render_tabela_conduta para a granularidade por motorista)."""
-    agregado = conduta.groupby(["fonte", "rotulo_evento"], as_index=False).agg(
-        n_janelas=("n_janelas", "sum"), n_detectados=("n_detectados", "sum"),
+def render_view_segmentacao(projecao, variancia_pct, kpis_cluster, gerais, significancia,
+                             normalizada, validacao_k):
+    opcoes_segmento = [CARTEIRA_COMPLETA] + kpis_cluster["nome_perfil"].tolist()
+    segmento_selecionado = st.pills(
+        "Filtrar por perfil", opcoes_segmento, default=CARTEIRA_COMPLETA, key="segmento_pills",
     )
-    agregado["taxa_deteccao"] = agregado["n_detectados"] / agregado["n_janelas"]
-    agregado["comportamento"] = agregado["rotulo_evento"].map(
-        lambda r: "normal" if r == "Non-aggressive event" else "agressiva"
+    if not segmento_selecionado:
+        segmento_selecionado = CARTEIRA_COMPLETA
+
+    aba_geral, aba_clusters, aba_validacao = st.tabs(
+        ["Visao geral", "Clusters (PCA)", "Validacao e insights"]
     )
-    agregado["comportamento_label"] = agregado["comportamento"].map(COMPORTAMENTO_LABEL)
-    presentes = [c for c in ("agressiva", "normal") if c in agregado["comportamento"].unique()]
-    ordem = [COMPORTAMENTO_LABEL[c] for c in presentes]
-    cores = [CORES_COMPORTAMENTO[c] for c in presentes]
-
-    grafico = alt.Chart(agregado).mark_bar(cornerRadiusTopLeft=6, cornerRadiusTopRight=6).encode(
-        x=alt.X("rotulo_evento:N", title=None, sort="-y", axis=alt.Axis(labelAngle=-30)),
-        y=alt.Y("taxa_deteccao:Q", title="Taxa de deteccao", axis=alt.Axis(format="%")),
-        color=alt.Color(
-            "comportamento_label:N", title="Rotulo comportamental",
-            scale=alt.Scale(domain=ordem, range=cores),
-        ),
-        tooltip=["fonte", "rotulo_evento", alt.Tooltip("taxa_deteccao:Q", format=".0%"), "n_janelas"],
-    ).properties(height=280)
-    st.altair_chart(grafico, width="stretch")
+    with aba_geral:
+        render_view_visao_geral(projecao, kpis_cluster, gerais, significancia, segmento_selecionado)
+    with aba_clusters:
+        render_view_clusters(projecao, variancia_pct)
+    with aba_validacao:
+        render_view_validacao_indices(normalizada, validacao_k, significancia)
 
 
-def render_bar_taxa_deteccao_motorista(conduta: pd.DataFrame):
-    dados = conduta[conduta["motorista"] != "desconhecido"].groupby(
-        ["fonte", "motorista"], as_index=False
-    ).agg(n_janelas=("n_janelas", "sum"), n_detectados=("n_detectados", "sum"))
-    dados["taxa_deteccao"] = dados["n_detectados"] / dados["n_janelas"]
+# ---------------------------------------------------------------------------
+# Aba 2 -- Validacao de Hardware (Part B.5 / A.7)
+# ---------------------------------------------------------------------------
 
-    grafico = alt.Chart(dados).mark_bar(
-        cornerRadiusTopLeft=6, cornerRadiusTopRight=6, color=CORES_COMPORTAMENTO["agressiva"],
-    ).encode(
-        x=alt.X("motorista:N", title=None, axis=alt.Axis(labelAngle=0)),
-        y=alt.Y("taxa_deteccao:Q", title="Taxa de deteccao", axis=alt.Axis(format="%")),
-        tooltip=["fonte", "motorista", alt.Tooltip("taxa_deteccao:Q", format=".0%"), "n_janelas"],
-    ).properties(height=280)
-    st.altair_chart(grafico, width="stretch")
-
-
-def render_tabela_conduta(conduta: pd.DataFrame):
-    tabela = conduta.copy()
-    tabela["taxa_deteccao"] = tabela["taxa_deteccao"].map(lambda v: f"{v:.0%}")
-    tabela["magnitude_media_ms2"] = tabela["magnitude_media_ms2"].map(lambda v: f"{v:.2f}")
-    tabela["magnitude_maxima_ms2"] = tabela["magnitude_maxima_ms2"].map(lambda v: f"{v:.2f}")
-    tabela = tabela[[
-        "fonte", "motorista", "rotulo_evento", "n_janelas", "n_detectados",
-        "taxa_deteccao", "magnitude_media_ms2", "magnitude_maxima_ms2",
-    ]]
-    tabela.columns = [
-        "Fonte", "Motorista", "Rotulo do evento", "Janelas", "Detectados",
-        "Taxa de deteccao", "Magnitude media (m/s^2)", "Magnitude maxima (m/s^2)",
-    ]
-    st.dataframe(tabela, width="stretch", hide_index=True)
+def render_metodologia_hardware():
+    st.info(
+        "**Substituicao de fonte de dados (documentada, nao um desvio silencioso).** "
+        "O plano original validava o firmware contra o UAH-DriveSet (ROMERA; BERGASA; "
+        "ARROYO, 2016), cujo host oficial e espelhos conhecidos ficaram indisponiveis "
+        "durante a execucao do PFE II. As fontes de substituicao -- Yuksel (2021) e "
+        "Ferreira Jr. et al. (2017) -- fornecem janelas estatisticas ja pre-extraidas "
+        "por evento (media, maximo, minimo, variancia, assimetria, curtose, desvio "
+        "padrao por eixo), nao um fluxo continuo bruto com rotulo de trajeto. Por isso "
+        "a validacao aqui e de **discriminacao do tipo de evento a partir de "
+        "estatisticas de janela**, e nao de deteccao em fluxo continuo -- o que, na "
+        "verdade, aproxima-se mais do que o proprio firmware produz (eventos "
+        "resumidos, nunca o fluxo bruto)."
+    )
 
 
-def render_view_telemetria(telemetria, conduta=None):
+def render_harmonizacao_unidades(conduta: pd.DataFrame):
+    st.markdown("##### Auditoria da harmonizacao de unidades")
     st.caption(
-        "Validacao dos limiares de deteccao de eventos do dispositivo (Secao B.3/B.5) "
-        "sobre trajetos reais do UAH-DriveSet (ROMERA; BERGASA; ARROYO, 2016), com "
-        "rotulo comportamental conhecido (normal/agressiva/sonolenta). Funciona como "
-        "evidencia comportamental de referencia enquanto o dispositivo ESP32 proprio "
-        "ainda nao coletou viagens reais: quando isso acontecer, os eventos resumidos "
-        "do dispositivo (contagem, intensidade, geolocalizacao) passam a complementar "
-        "esta mesma visao, sob o mesmo esquema de evento."
+        "Magnitude resultante media por fonte, antes (escala bruta declarada por cada "
+        "fonte) e depois da conversao empirica g -> m/s^2 (x9,80665). A fonte Yuksel "
+        "(2021) documenta saida em m/s^2, mas o valor observado em janelas de baixa "
+        "variancia (~1,0) e consistente com g -- por isso a conversao e feita por "
+        "verificacao empirica, nunca por confianca cega na documentacao da fonte "
+        "(ver Part B.5)."
     )
 
-    if telemetria is None or telemetria.empty:
-        st.info(
-            "Nenhum resumo de telemetria encontrado em data/processed/. Baixe o "
-            "UAH-DriveSet e rode:\n\n"
-            "`python src/validacao_hardware.py --dataset-dir data/raw/uah-driveset`"
+    antes = conduta[["FonteLabel", "AccMagMean_raw"]].rename(columns={"AccMagMean_raw": "Magnitude"})
+    antes["Etapa"] = "Antes (escala bruta)"
+    depois = conduta[["FonteLabel", "AccMagMean_mps2"]].rename(columns={"AccMagMean_mps2": "Magnitude"})
+    depois["Etapa"] = "Depois (m/s^2)"
+    comparativo = pd.concat([antes, depois], ignore_index=True)
+
+    grafico = alt.Chart(comparativo).mark_boxplot(size=28).encode(
+        x=alt.X("Etapa:N", title=None, sort=["Antes (escala bruta)", "Depois (m/s^2)"]),
+        y=alt.Y("Magnitude:Q", title="Magnitude media da janela"),
+        color=alt.Color(
+            "FonteLabel:N", title="Fonte",
+            scale=alt.Scale(domain=list(CORES_FONTE.keys()), range=list(CORES_FONTE.values())),
+        ),
+        column=alt.Column("FonteLabel:N", title=None),
+    ).properties(height=280, width=220)
+    st.altair_chart(grafico, width="content")
+    st.caption(
+        "Apos a conversao, ambas as fontes convergem para ~9,8 m/s^2 (gravidade em "
+        "repouso), confirmando que a harmonizacao foi aplicada corretamente antes de "
+        "qualquer limiar fisico absoluto ser usado."
+    )
+
+
+def render_confusao_por_fonte(metricas: pd.DataFrame):
+    st.markdown("##### Matriz de confusao e metricas por fonte")
+    st.caption(
+        "Reportado por fonte, nunca em uma figura unica -- as duas fontes sao "
+        "desbalanceadas em ~95/5 (1.102 janelas Yuksel vs. 55 Ferreira Jr.), e um "
+        "pool ingenuo seria dominado pela maior."
+    )
+    linhas_fonte = metricas[(metricas["categoria"] == "todas") & (metricas["recorte"] != "pooled")]
+    colunas = st.columns(len(linhas_fonte))
+    for coluna, (_, linha) in zip(colunas, linhas_fonte.iterrows()):
+        with coluna:
+            with st.container(border=True):
+                st.markdown(f"**{linha['FonteLabel']}**")
+                st.caption(f"n = {int(linha['n'])} janelas")
+                st.metric("Precisao", f"{linha['precision']:.1%}")
+                st.metric("Recall", f"{linha['recall']:.1%}")
+                st.metric("F1", f"{linha['f1']:.3f}")
+                st.markdown(
+                    f"VP={int(linha['tp'])} · FN={int(linha['fn'])} · "
+                    f"VN={int(linha['tn'])} · FP={int(linha['fp'])}"
+                )
+
+
+def render_recall_por_categoria(metricas: pd.DataFrame):
+    st.markdown("##### Recall por categoria harmonizada de evento, por fonte")
+    st.caption(
+        "ACCELERATION / BRAKING / TURN sao as categorias que o firmware efetivamente "
+        "classifica. O recall varia fortemente entre fonte e categoria -- isso e "
+        "reportado como achado, nao suavizado por media."
+    )
+    dados = metricas[
+        (metricas["categoria"] != "todas") & (metricas["recorte"] != "pooled")
+    ].copy()
+    dados["CategoriaLabel"] = dados["categoria"].map(CATEGORIA_LABEL)
+
+    grafico = alt.Chart(dados).mark_bar(cornerRadiusTopLeft=6, cornerRadiusTopRight=6).encode(
+        x=alt.X("CategoriaLabel:N", title=None, axis=alt.Axis(labelAngle=0)),
+        y=alt.Y("recall:Q", title="Recall", axis=alt.Axis(format="%")),
+        color=alt.Color(
+            "FonteLabel:N", title="Fonte",
+            scale=alt.Scale(domain=list(CORES_FONTE.keys()), range=list(CORES_FONTE.values())),
+        ),
+        xOffset="FonteLabel:N",
+        tooltip=["FonteLabel", "CategoriaLabel", alt.Tooltip("recall:Q", format=".1%"), "n"],
+    ).properties(height=300)
+    st.altair_chart(grafico, width="stretch")
+
+    gap = dados.pivot(index="CategoriaLabel", columns="FonteLabel", values="recall")
+    if "Yuksel (2021)" in gap.columns and "Ferreira Jr. et al. (2017)" in gap.columns:
+        st.warning(
+            "**Achado a reportar, nao a ocultar:** o recall e sistematicamente muito "
+            "mais baixo em Yuksel (2021) do que em Ferreira Jr. et al. (2017) em todas "
+            "as categorias. Causas plausiveis: o limiar de literatura (~6 m/s^2) foi "
+            "calibrado sobre sinal bruto de alta taxa de amostragem, enquanto Yuksel "
+            "(2021) tem taxa efetiva muito menor (~2 Hz); e a agregacao em nivel de "
+            "janela atenua picos instantaneos reais em relacao a um limiar pontual. "
+            "O limiar nao foi reajustado para melhorar esse numero -- isso invalidaria "
+            "o uso de um limiar de literatura obtido de forma independente."
         )
-    else:
-        render_kpis_telemetria(telemetria)
 
-        col_bar, col_box = st.columns(2)
-        with col_bar:
-            with st.container(border=True):
-                st.markdown("##### Eventos por minuto, por rotulo comportamental")
-                st.caption("Media entre os trajetos de cada rotulo conhecido")
-                render_bar_eventos_comportamento(telemetria)
-        with col_box:
-            with st.container(border=True):
-                st.markdown("##### Magnitude maxima por trajeto, por rotulo comportamental")
-                st.caption("Distribuicao entre os trajetos de cada rotulo conhecido")
-                render_box_magnitude(telemetria)
 
-        with st.container(border=True):
-            st.markdown("##### Trajetos analisados")
-            render_tabela_telemetria(telemetria)
-
-    st.divider()
-    st.markdown("#### Validacao cruzada: datasets publicos de conducao")
-    st.caption(
-        "Segunda fonte de validacao, independente do UAH-DriveSet: janelas ja "
-        "rotuladas por manobra dos datasets de Yuksel & Atmaca (2020) e Jair Jr. "
-        "(2016), classificadas pelo mesmo limiar de magnitude do ESP32. Apenas o "
-        "Jair Jr. (2016) tem uma classe 'nao agressiva' de controle -- e nele que "
-        "o qui-quadrado (impresso ao rodar src/validacao_hardware.py) confirma que "
-        "o limiar discrimina evento agressivo de evento normal."
+def render_limitacoes_hardware():
+    st.markdown("##### Limitacoes desta validacao (Secao 3.8)")
+    st.warning(
+        "- **Sem validacao de sonolencia**: nenhuma das duas fontes de substituicao "
+        "possui rotulo de conducao sonolenta; esse eixo foi removido do escopo, nao "
+        "apenas nao implementado.\n"
+        "- **Sem validacao de GPS/velocidade**: nenhuma fonte inclui canal de GPS ou "
+        "velocidade; o criterio de excesso de velocidade do firmware nao pode ser "
+        "validado com estes dados.\n"
+        "- **Mudanca de faixa e 'nao agressivo' fora de escopo**: presentes apenas em "
+        "Ferreira Jr. et al. (2017); um no de acelerometro + GPS unico nao e capaz de "
+        "detectar mudanca de faixa (falta dado de direcao/esterco), entao essas linhas "
+        "sao excluidas da avaliacao, nao descartadas silenciosamente.\n"
+        "- **Desbalanceamento de fontes**: ~95% das janelas vem de Yuksel (2021); toda "
+        "metrica acima e reportada por fonte para essa assimetria nao dominar a leitura.\n"
+        "- **Proxy de pico, nao amostra bruta**: como as fontes so fornecem estatisticas "
+        "por janela (nao o sinal bruto por amostra), o pico dinamico usado aqui e "
+        "aproximado pelo desvio Max/Min em relacao a Media da janela, nao pela deteccao "
+        "de pico instantaneo que o firmware faz sobre o sinal continuo."
     )
-    if conduta is None or conduta.empty:
-        st.info(
-            "Nenhum resumo encontrado em data/processed/. Rode:\n\n"
-            "`python src/validacao_hardware.py --conduta-csv "
-            "data/raw/combined_normalized_driver_conduct.csv`"
+
+
+def render_view_validacao_hardware(conduta, metricas):
+    if conduta is None or metricas is None:
+        st.error(
+            "Nenhum resultado de validacao de hardware encontrado em data/processed/. "
+            "Execute `python src/validacao_hardware.py` antes de abrir esta aba."
         )
         return
 
-    render_kpis_conduta(conduta)
-
-    tem_motorista = (conduta["motorista"] != "desconhecido").any()
-    if tem_motorista:
-        col_evento, col_motorista = st.columns(2)
-    else:
-        col_evento = st.container()
-
-    with col_evento:
-        with st.container(border=True):
-            st.markdown("##### Taxa de deteccao por rotulo de evento")
-            render_bar_taxa_deteccao_conduta(conduta)
-    if tem_motorista:
-        with col_motorista:
-            with st.container(border=True):
-                st.markdown("##### Taxa de deteccao por motorista")
-                st.caption("Somente Jair Jr. (2016) identifica o motorista por trajeto")
-                render_bar_taxa_deteccao_motorista(conduta)
+    render_metodologia_hardware()
 
     with st.container(border=True):
-        st.markdown("##### Resumo por motorista e rotulo de evento")
-        render_tabela_conduta(conduta)
+        render_harmonizacao_unidades(conduta)
+
+    with st.container(border=True):
+        render_confusao_por_fonte(metricas)
+
+    with st.container(border=True):
+        render_recall_por_categoria(metricas)
+
+    render_limitacoes_hardware()
+
+
+# ---------------------------------------------------------------------------
+# Aba 3 -- Coligacao Conceitual (Part A.7 / C) -- passeio ilustrativo, sem
+# juncao real entre dados sinteticos de apolice e dados publicos de conducao.
+# ---------------------------------------------------------------------------
+
+def render_view_coligacao(original: pd.DataFrame, mapa_perfil: dict, conduta: pd.DataFrame):
+    st.markdown(
+        '<div class="no-join-banner">'
+        '<b>Nao ha juncao real entre os dois conjuntos de dados nesta aba.</b> '
+        'A apolice sintetica e o evento de conducao publico abaixo nao compartilham '
+        'nenhuma chave/entidade real -- nao existe motorista, veiculo ou vinculo '
+        'contratual em comum entre uma apolice gerada sinteticamente para esta PoC e '
+        'um motorista de um dataset publico de conducao. O par exibido e puramente '
+        'ilustrativo: narra o TIPO de sinal que, em producao, um dispositivo ESP32 '
+        'proprio instalado na frota dessa apolice alimentaria de volta na '
+        'classificacao (Secao 2.2.5 / 3.4.1) -- nao um resultado estatistico '
+        'demonstrado.'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+
+    if conduta is None or conduta.empty:
+        st.info("Execute src/validacao_hardware.py para habilitar o exemplo ilustrativo.")
+        return
+
+    original = original.copy()
+    original["perfil_numero"] = original["cluster"].map(mapa_perfil)
+    candidatos_perfil1 = original[original["perfil_numero"] == 1]
+    if candidatos_perfil1.empty:
+        st.info("Nenhuma apolice do Perfil 1 encontrada na base atual.")
+        return
+    apolice = candidatos_perfil1.sort_values(
+        ["valor_pago_historico", "classe_risco"], ascending=False
+    ).iloc[0]
+
+    eventos_alvo = conduta[
+        (conduta["ValidationRole"] == "harsh")
+        & (conduta["EventCategory"].isin(["TURN", "BRAKING"]))
+        & (conduta["HarshPredicted_6mps2"] == 1)
+    ]
+    if eventos_alvo.empty:
+        eventos_alvo = conduta[conduta["ValidationRole"] == "harsh"]
+    evento = eventos_alvo.sort_values("PeakDynamicAccel_mps2", ascending=False).iloc[0]
+
+    st.markdown("##### Exemplo ilustrativo")
+    col_apolice, col_evento = st.columns(2)
+    with col_apolice:
+        with st.container(border=True):
+            st.markdown(f"**Apolice (dado sintetico) · {NOME_PERFIL[1]}**")
+            st.caption("Cadastro/cotacao -- lado da segmentacao (Parte A)")
+            st.markdown(
+                f"- Numero: `{apolice['numeroApolice']}`\n"
+                f"- Frota total: {apolice['total_veiculos']:.0f} veiculos "
+                f"({apolice['pct_autonomos']:.0%} autonomos/terceiros)\n"
+                f"- Classe de risco: {apolice['classe_risco']:.0f}/5\n"
+                f"- Motorista licenciado: {'sim' if apolice['motorista_licenciado'] else 'nao'}\n"
+                f"- Custo historico declarado: {_fmt_brl(apolice['valor_pago_historico'])}"
+            )
+    with col_evento:
+        with st.container(border=True):
+            fonte_label = FONTE_LABEL.get(evento["SourceDataset"], evento["SourceDataset"])
+            st.markdown(f"**Evento de conducao (dataset publico) · {fonte_label}**")
+            st.caption("Janela rotulada -- lado da validacao de hardware (Parte B)")
+            st.markdown(
+                f"- Categoria harmonizada: {CATEGORIA_LABEL.get(evento['EventCategory'], evento['EventCategory'])}\n"
+                f"- Rotulo original: {evento['EventLabel']}\n"
+                f"- Magnitude dinamica de pico: {evento['PeakDynamicAccel_mps2']:.2f} m/s^2\n"
+                f"- Acima do limiar (~6 m/s^2): {'sim' if evento['HarshPredicted_6mps2'] else 'nao'}"
+            )
+
+    st.caption(
+        "Narrativa ilustrativa: se o dispositivo ESP32 desta frota (Perfil 1, ja "
+        "sinalizada como alto risco pela segmentacao historica) registrasse um evento "
+        "de conducao com esta magnitude, esse sumario reforcaria/confirmaria a "
+        "classificacao existente -- e o inverso, uma frota com poucos eventos "
+        "assim, poderia reduzi-la ao longo do tempo (Secao 3.4.1). Nenhum coeficiente "
+        "de correlacao ou KPI estatistico e calculado aqui, pois nenhuma relacao real "
+        "entre os dois conjuntos de dados existe nesta PoC."
+    )
 
 
 def render_view_exportar():
@@ -703,9 +721,8 @@ def render_view_exportar():
         "Estatisticas descritivas por cluster": "perfis_estatisticas_descritivas.csv",
         "Testes de significancia por variavel": "perfis_testes_significancia.csv",
         "Curva de validacao de k (cotovelo/silhouette)": "validacao_k.csv",
-        "Telemetria por trajeto (UAH-DriveSet)": "validacao_hardware_uah_driveset.csv",
-        "Validacao cruzada por janela (datasets publicos de conducao)": "validacao_hardware_conduta_combinada.csv",
-        "Resumo da validacao cruzada por rotulo de evento": "validacao_hardware_conduta_combinada_resumo.csv",
+        "Conduta harmonizada por janela (Yuksel 2021 + Ferreira Jr. 2017)": "driver_conduct_harmonized.csv",
+        "Metricas de discriminacao por fonte e categoria": "driver_conduct_metrics.csv",
     }
     for titulo, nome_arquivo in arquivos.items():
         caminho = DADOS_DIR / nome_arquivo
@@ -723,14 +740,14 @@ def render_view_exportar():
 def main():
     st.set_page_config(page_title="Segmentacao RCT", layout="wide")
     aplicar_estilo()
-    view = render_sidebar()
+    render_sidebar()
 
     col_titulo, col_badge = st.columns([4, 1])
     with col_titulo:
         st.title("Segmentacao de Transportadoras - Produto RCT")
         st.caption(
-            "Dashboard de visualizacao e validacao dos resultados da segmentacao por K-Means "
-            "(Etapa 4 da metodologia)."
+            "Dashboard de visualizacao e validacao dos resultados da segmentacao por "
+            "K-Means (Parte A) e da camada de telemetria embarcada (Parte B)."
         )
     with col_badge:
         st.markdown(
@@ -752,6 +769,8 @@ def main():
     gerais = calcular_kpis_gerais(original)
     significancia = carregar_significancia()
     validacao_k = carregar_validacao_k()
+    conduta = carregar_conduta_harmonizada()
+    metricas = carregar_conduta_metricas()
 
     projecao, variancia_pct = projetar_pca(normalizada)
     projecao = projecao.merge(
@@ -762,24 +781,19 @@ def main():
     projecao["perfil_numero"] = projecao["cluster"].map(mapa_perfil)
     projecao["nome_perfil"] = projecao["perfil_numero"].map(NOME_PERFIL)
 
-    if view not in ("Exportar dados", "Telemetria (UAH-DriveSet)"):
-        opcoes_segmento = [CARTEIRA_COMPLETA] + kpis_cluster["nome_perfil"].tolist()
-        segmento_selecionado = st.pills(
-            "Filtrar por perfil", opcoes_segmento, default=CARTEIRA_COMPLETA,
-            key="segmento_pills",
+    aba_segmentacao, aba_hardware, aba_coligacao = st.tabs(
+        ["Segmentacao", "Validacao de Hardware", "Coligacao Conceitual"]
+    )
+    with aba_segmentacao:
+        render_view_segmentacao(
+            projecao, variancia_pct, kpis_cluster, gerais, significancia, normalizada, validacao_k
         )
-        if not segmento_selecionado:
-            segmento_selecionado = CARTEIRA_COMPLETA
+    with aba_hardware:
+        render_view_validacao_hardware(conduta, metricas)
+    with aba_coligacao:
+        render_view_coligacao(original, mapa_perfil, conduta)
 
-    if view == "Visao geral":
-        render_view_visao_geral(projecao, kpis_cluster, gerais, significancia, segmento_selecionado)
-    elif view == "Clusters (PCA)":
-        render_view_clusters(projecao, variancia_pct)
-    elif view == "Validacao e insights":
-        render_view_validacao(normalizada, validacao_k, significancia)
-    elif view == "Telemetria (UAH-DriveSet)":
-        render_view_telemetria(carregar_telemetria(), carregar_conduta_combinada())
-    elif view == "Exportar dados":
+    with st.expander("Exportar dados"):
         render_view_exportar()
 
     st.markdown(
