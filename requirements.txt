@@ -5,4 +5,5 @@ scipy
 matplotlib
 seaborn
 streamlit
+altair
 Faker
