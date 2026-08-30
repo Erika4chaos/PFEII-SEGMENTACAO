@@ -41,6 +41,24 @@ NOME_PERFIL = {
 CORES_PERFIL = {1: "#e87ba4", 2: "#2a78d6", 3: "#008300"}
 COR_LINHA_DESTAQUE = "#c2185b"
 
+# Rotulos comportamentais do UAH-DriveSet (src/validacao_hardware.py), usados
+# na aba de telemetria. Reaproveita as 3 cores categoricas ja validadas acima
+# (mesmos hex de CORES_PERFIL) para manter a identidade visual do dashboard;
+# "desconhecido" e um cinza neutro (nao e uma 4a categoria de dados, apenas
+# trajetos sem rotulo no caminho) e nao entrou na validacao de pares CVD.
+COMPORTAMENTO_LABEL = {
+    "normal": "Normal",
+    "agressiva": "Agressiva",
+    "sonolenta": "Sonolenta",
+    "desconhecido": "Nao identificado",
+}
+CORES_COMPORTAMENTO = {
+    "normal": "#2a78d6",
+    "agressiva": "#e87ba4",
+    "sonolenta": "#008300",
+    "desconhecido": "#8a7f97",
+}
+
 
 def _fmt_brl(valor: float) -> str:
     return f"R$ {valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
@@ -74,6 +92,27 @@ def carregar_validacao_k():
 @st.cache_data
 def carregar_significancia():
     caminho = DADOS_DIR / "perfis_testes_significancia.csv"
+    return pd.read_csv(caminho) if caminho.exists() else None
+
+
+@st.cache_data
+def carregar_telemetria():
+    """Resumo por trajeto do UAH-DriveSet, gerado por
+    src/validacao_hardware.py: evidencia comportamental de referencia para a
+    camada de hardware enquanto o dispositivo ESP32 proprio nao coletou
+    viagens reais (mesmo esquema de evento: contagem, intensidade,
+    geolocalizacao)."""
+    caminho = DADOS_DIR / "validacao_hardware_uah_driveset.csv"
+    return pd.read_csv(caminho) if caminho.exists() else None
+
+
+@st.cache_data
+def carregar_conduta_combinada():
+    """Resumo por rotulo de evento de dois datasets publicos de conducao
+    (Yuksel & Atmaca, 2020; Jair Jr., 2016), classificados pelo mesmo
+    limiar de deteccao do ESP32 em src/validacao_hardware.py -- segunda
+    fonte de validacao, independente do UAH-DriveSet."""
+    caminho = DADOS_DIR / "validacao_hardware_conduta_combinada_resumo.csv"
     return pd.read_csv(caminho) if caminho.exists() else None
 
 
@@ -240,7 +279,10 @@ def render_sidebar() -> str:
         if "view" not in st.session_state:
             st.session_state["view"] = "Visao geral"
 
-        opcoes = ["Visao geral", "Clusters (PCA)", "Validacao e insights", "Exportar dados"]
+        opcoes = [
+            "Visao geral", "Clusters (PCA)", "Validacao e insights",
+            "Telemetria (UAH-DriveSet)", "Exportar dados",
+        ]
         for opcao in opcoes:
             ativo = st.session_state["view"] == opcao
             if st.button(
@@ -431,6 +473,190 @@ def render_view_validacao(normalizada, validacao_k, significancia):
         st.caption("Rode src/perfilamento.py para gerar os testes de significancia.")
 
 
+def render_kpis_telemetria(telemetria: pd.DataFrame):
+    colunas = st.columns(4)
+    itens = [
+        ("Trajetos analisados", str(len(telemetria))),
+        ("Motoristas distintos", str(telemetria["motorista"].nunique())),
+        ("Eventos detectados", str(int(telemetria["n_eventos"].sum()))),
+        ("Eventos/min (media)", f"{telemetria['eventos_por_min'].mean():.2f}"),
+    ]
+    for coluna, (rotulo, valor) in zip(colunas, itens):
+        coluna.metric(rotulo, valor)
+
+
+def _ordem_e_cores_comportamento(telemetria: pd.DataFrame) -> tuple[list, list]:
+    presentes = [c for c in CORES_COMPORTAMENTO if c in telemetria["comportamento"].unique()]
+    ordem = [COMPORTAMENTO_LABEL[c] for c in presentes]
+    cores = [CORES_COMPORTAMENTO[c] for c in presentes]
+    return ordem, cores
+
+
+def render_bar_eventos_comportamento(telemetria: pd.DataFrame):
+    ordem, cores = _ordem_e_cores_comportamento(telemetria)
+    agregado = telemetria.groupby("comportamento")["eventos_por_min"].mean().reset_index()
+    agregado["comportamento_label"] = agregado["comportamento"].map(COMPORTAMENTO_LABEL)
+
+    grafico = alt.Chart(agregado).mark_bar(cornerRadiusTopLeft=6, cornerRadiusTopRight=6).encode(
+        x=alt.X("comportamento_label:N", title=None, sort=ordem, axis=alt.Axis(labelAngle=0)),
+        y=alt.Y("eventos_por_min:Q", title="Eventos por minuto (media)"),
+        color=alt.Color(
+            "comportamento_label:N", title="Rotulo comportamental",
+            scale=alt.Scale(domain=ordem, range=cores),
+        ),
+        tooltip=["comportamento_label", alt.Tooltip("eventos_por_min:Q", format=".2f")],
+    ).properties(height=280)
+    st.altair_chart(grafico, width="stretch")
+
+
+def render_box_magnitude(telemetria: pd.DataFrame):
+    ordem, cores = _ordem_e_cores_comportamento(telemetria)
+    dados = telemetria.copy()
+    dados["comportamento_label"] = dados["comportamento"].map(COMPORTAMENTO_LABEL)
+
+    grafico = alt.Chart(dados).mark_boxplot(size=36).encode(
+        x=alt.X("comportamento_label:N", title=None, sort=ordem, axis=alt.Axis(labelAngle=0)),
+        y=alt.Y("magnitude_maxima_ms2:Q", title="Magnitude maxima do trajeto (m/s^2)"),
+        color=alt.Color(
+            "comportamento_label:N",
+            scale=alt.Scale(domain=ordem, range=cores), legend=None,
+        ),
+    ).properties(height=280)
+    st.altair_chart(grafico, width="stretch")
+
+
+def render_tabela_telemetria(telemetria: pd.DataFrame):
+    tabela = telemetria[[
+        "motorista", "comportamento", "duracao_min", "n_eventos",
+        "eventos_por_min", "magnitude_media_ms2", "magnitude_maxima_ms2",
+    ]].copy()
+    tabela["comportamento"] = tabela["comportamento"].map(COMPORTAMENTO_LABEL)
+    tabela["duracao_min"] = tabela["duracao_min"].map(lambda v: f"{v:.1f}")
+    tabela["eventos_por_min"] = tabela["eventos_por_min"].map(lambda v: f"{v:.2f}")
+    tabela["magnitude_media_ms2"] = tabela["magnitude_media_ms2"].map(lambda v: f"{v:.2f}")
+    tabela["magnitude_maxima_ms2"] = tabela["magnitude_maxima_ms2"].map(lambda v: f"{v:.2f}")
+    tabela.columns = [
+        "Motorista", "Comportamento", "Duracao (min)", "Eventos",
+        "Eventos/min", "Magnitude media (m/s^2)", "Magnitude maxima (m/s^2)",
+    ]
+    st.dataframe(tabela, width="stretch", hide_index=True)
+
+
+def render_kpis_conduta(conduta: pd.DataFrame):
+    total_janelas = int(conduta["n_janelas"].sum())
+    total_detectados = int(conduta["n_detectados"].sum())
+    taxa_geral = total_detectados / total_janelas if total_janelas else float("nan")
+    colunas = st.columns(3)
+    itens = [
+        ("Janelas analisadas", str(total_janelas)),
+        ("Fontes de dados", str(conduta["fonte"].nunique())),
+        ("Taxa de deteccao geral", f"{taxa_geral:.0%}"),
+    ]
+    for coluna, (rotulo, valor) in zip(colunas, itens):
+        coluna.metric(rotulo, valor)
+
+
+def render_bar_taxa_deteccao_conduta(conduta: pd.DataFrame):
+    dados = conduta.copy()
+    dados["comportamento"] = dados["rotulo_evento"].map(
+        lambda r: "normal" if r == "Non-aggressive event" else "agressiva"
+    )
+    dados["comportamento_label"] = dados["comportamento"].map(COMPORTAMENTO_LABEL)
+    presentes = [c for c in ("agressiva", "normal") if c in dados["comportamento"].unique()]
+    ordem = [COMPORTAMENTO_LABEL[c] for c in presentes]
+    cores = [CORES_COMPORTAMENTO[c] for c in presentes]
+
+    grafico = alt.Chart(dados).mark_bar(cornerRadiusTopLeft=6, cornerRadiusTopRight=6).encode(
+        x=alt.X("rotulo_evento:N", title=None, sort="-y", axis=alt.Axis(labelAngle=-30)),
+        y=alt.Y("taxa_deteccao:Q", title="Taxa de deteccao", axis=alt.Axis(format="%")),
+        color=alt.Color(
+            "comportamento_label:N", title="Rotulo comportamental",
+            scale=alt.Scale(domain=ordem, range=cores),
+        ),
+        tooltip=["fonte", "rotulo_evento", alt.Tooltip("taxa_deteccao:Q", format=".0%"), "n_janelas"],
+    ).properties(height=280)
+    st.altair_chart(grafico, width="stretch")
+
+
+def render_tabela_conduta(conduta: pd.DataFrame):
+    tabela = conduta.copy()
+    tabela["taxa_deteccao"] = tabela["taxa_deteccao"].map(lambda v: f"{v:.0%}")
+    tabela["magnitude_media_ms2"] = tabela["magnitude_media_ms2"].map(lambda v: f"{v:.2f}")
+    tabela["magnitude_maxima_ms2"] = tabela["magnitude_maxima_ms2"].map(lambda v: f"{v:.2f}")
+    tabela = tabela[[
+        "fonte", "rotulo_evento", "n_janelas", "n_detectados",
+        "taxa_deteccao", "magnitude_media_ms2", "magnitude_maxima_ms2",
+    ]]
+    tabela.columns = [
+        "Fonte", "Rotulo do evento", "Janelas", "Detectados",
+        "Taxa de deteccao", "Magnitude media (m/s^2)", "Magnitude maxima (m/s^2)",
+    ]
+    st.dataframe(tabela, width="stretch", hide_index=True)
+
+
+def render_view_telemetria(telemetria, conduta=None):
+    st.caption(
+        "Validacao dos limiares de deteccao de eventos do dispositivo (Secao B.3/B.5) "
+        "sobre trajetos reais do UAH-DriveSet (ROMERA; BERGASA; ARROYO, 2016), com "
+        "rotulo comportamental conhecido (normal/agressiva/sonolenta). Funciona como "
+        "evidencia comportamental de referencia enquanto o dispositivo ESP32 proprio "
+        "ainda nao coletou viagens reais: quando isso acontecer, os eventos resumidos "
+        "do dispositivo (contagem, intensidade, geolocalizacao) passam a complementar "
+        "esta mesma visao, sob o mesmo esquema de evento."
+    )
+
+    if telemetria is None or telemetria.empty:
+        st.info(
+            "Nenhum resumo de telemetria encontrado em data/processed/. Baixe o "
+            "UAH-DriveSet e rode:\n\n"
+            "`python src/validacao_hardware.py --dataset-dir data/raw/uah-driveset`"
+        )
+    else:
+        render_kpis_telemetria(telemetria)
+
+        col_bar, col_box = st.columns(2)
+        with col_bar:
+            with st.container(border=True):
+                st.markdown("##### Eventos por minuto, por rotulo comportamental")
+                st.caption("Media entre os trajetos de cada rotulo conhecido")
+                render_bar_eventos_comportamento(telemetria)
+        with col_box:
+            with st.container(border=True):
+                st.markdown("##### Magnitude maxima por trajeto, por rotulo comportamental")
+                st.caption("Distribuicao entre os trajetos de cada rotulo conhecido")
+                render_box_magnitude(telemetria)
+
+        with st.container(border=True):
+            st.markdown("##### Trajetos analisados")
+            render_tabela_telemetria(telemetria)
+
+    st.divider()
+    st.markdown("#### Validacao cruzada: datasets publicos de conducao")
+    st.caption(
+        "Segunda fonte de validacao, independente do UAH-DriveSet: janelas ja "
+        "rotuladas por manobra dos datasets de Yuksel & Atmaca (2020) e Jair Jr. "
+        "(2016), classificadas pelo mesmo limiar de magnitude do ESP32. Apenas o "
+        "Jair Jr. (2016) tem uma classe 'nao agressiva' de controle -- e nele que "
+        "o qui-quadrado (impresso ao rodar src/validacao_hardware.py) confirma que "
+        "o limiar discrimina evento agressivo de evento normal."
+    )
+    if conduta is None or conduta.empty:
+        st.info(
+            "Nenhum resumo encontrado em data/processed/. Rode:\n\n"
+            "`python src/validacao_hardware.py --conduta-csv "
+            "data/raw/combined_normalized_driver_conduct.csv`"
+        )
+        return
+
+    render_kpis_conduta(conduta)
+    with st.container(border=True):
+        st.markdown("##### Taxa de deteccao por rotulo de evento")
+        render_bar_taxa_deteccao_conduta(conduta)
+    with st.container(border=True):
+        st.markdown("##### Resumo por rotulo de evento")
+        render_tabela_conduta(conduta)
+
+
 def render_view_exportar():
     arquivos = {
         "Matriz original com rotulos de cluster": "matriz_original_clusters.csv",
@@ -438,6 +664,9 @@ def render_view_exportar():
         "Estatisticas descritivas por cluster": "perfis_estatisticas_descritivas.csv",
         "Testes de significancia por variavel": "perfis_testes_significancia.csv",
         "Curva de validacao de k (cotovelo/silhouette)": "validacao_k.csv",
+        "Telemetria por trajeto (UAH-DriveSet)": "validacao_hardware_uah_driveset.csv",
+        "Validacao cruzada por janela (datasets publicos de conducao)": "validacao_hardware_conduta_combinada.csv",
+        "Resumo da validacao cruzada por rotulo de evento": "validacao_hardware_conduta_combinada_resumo.csv",
     }
     for titulo, nome_arquivo in arquivos.items():
         caminho = DADOS_DIR / nome_arquivo
@@ -494,7 +723,7 @@ def main():
     projecao["perfil_numero"] = projecao["cluster"].map(mapa_perfil)
     projecao["nome_perfil"] = projecao["perfil_numero"].map(NOME_PERFIL)
 
-    if view != "Exportar dados":
+    if view not in ("Exportar dados", "Telemetria (UAH-DriveSet)"):
         opcoes_segmento = [CARTEIRA_COMPLETA] + kpis_cluster["nome_perfil"].tolist()
         segmento_selecionado = st.pills(
             "Filtrar por perfil", opcoes_segmento, default=CARTEIRA_COMPLETA,
@@ -509,6 +738,8 @@ def main():
         render_view_clusters(projecao, variancia_pct)
     elif view == "Validacao e insights":
         render_view_validacao(normalizada, validacao_k, significancia)
+    elif view == "Telemetria (UAH-DriveSet)":
+        render_view_telemetria(carregar_telemetria(), carregar_conduta_combinada())
     elif view == "Exportar dados":
         render_view_exportar()
 
