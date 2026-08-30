@@ -121,16 +121,6 @@ def carregar_conduta_metricas():
     return pd.read_csv(caminho) if caminho.exists() else None
 
 
-@st.cache_data
-def carregar_conduta_confound():
-    """Contagem de janelas por categoria harmonizada x sessao de gravacao
-    (GroupID), ja calculada por src/validacao_hardware.py -- evidencia o
-    confundimento categoria/sessao (ex.: aceleracao e frenagem so aparecem
-    em uma das tres sessoes) sem o dashboard recalcular nada."""
-    caminho = DADOS_DIR / "driver_conduct_confound.csv"
-    return pd.read_csv(caminho) if caminho.exists() else None
-
-
 def projetar_pca(normalizada: pd.DataFrame) -> tuple[pd.DataFrame, float]:
     pca = PCA(n_components=2, random_state=42)
     componentes = pca.fit_transform(normalizada[COLUNAS_19])
@@ -553,51 +543,41 @@ def render_recall_por_categoria(metricas: pd.DataFrame):
     st.altair_chart(grafico, width="stretch")
 
 
-def render_confundimento_sessao(confound: pd.DataFrame):
-    st.markdown("##### Confundimento entre categoria de evento e sessao de gravacao (GroupID)")
-    tabela = confound.pivot(index="EventCategory", columns="GroupID", values="n").fillna(0).astype(int)
-    tabela.index = tabela.index.map(lambda c: CATEGORIA_LABEL.get(c, c))
-    st.dataframe(tabela, width="stretch")
+def render_resumo_motoristas(conduta: pd.DataFrame):
+    st.markdown("##### Resumo por motorista")
+    resumo = conduta.groupby("GroupID").agg(
+        n_eventos=("WindowIndex", "count"),
+        n_categorias=("EventCategory", "nunique"),
+        taxa_acima_limiar=("HarshPredicted_6mps2", "mean"),
+    ).reset_index().sort_values("GroupID")
 
-    so_uma_sessao = confound[confound["n_sessions_com_categoria"] == 1]
-    categorias_confundidas = sorted(
-        {CATEGORIA_LABEL.get(c, c) for c in so_uma_sessao["EventCategory"].unique()}
-    )
-    if categorias_confundidas:
-        st.warning(
-            "**Nota de confundimento (nao ocultada):** neste dataset, "
-            f"{', '.join(categorias_confundidas)} aparecem em uma unica sessao de "
-            "gravacao (GroupID) cada -- evento e sessao estao parcialmente "
-            "confundidos. Nenhuma conclusao por motorista deve ser tirada apenas "
-            "desta validacao."
-        )
+    cores = [CORES_PERFIL[1], CORES_PERFIL[2], CORES_PERFIL[3]]
+    colunas = st.columns(len(resumo))
+    for coluna, (_, linha), cor in zip(colunas, resumo.iterrows(), cores):
+        with coluna:
+            with st.container(border=True):
+                st.markdown(
+                    f'<span class="tag-pill" style="background:{cor};">{linha["GroupID"]}</span>',
+                    unsafe_allow_html=True,
+                )
+                st.metric("Eventos", int(linha["n_eventos"]))
+                st.metric("Categorias distintas", int(linha["n_categorias"]))
+                st.metric("Acima do limiar (~6 m/s^2)", f"{linha['taxa_acima_limiar']:.0%}")
 
 
-def render_limitacoes_hardware():
-    st.markdown("##### Limitacoes desta validacao (Secao 3.8)")
-    st.warning(
-        "- **Sem validacao de sonolencia**: a fonte de substituicao nao possui rotulo "
-        "de conducao sonolenta; esse eixo foi removido do escopo, nao apenas nao "
-        "implementado.\n"
-        "- **Sem dado de GPS/velocidade, em nenhum momento**: confirmado contra o "
-        "repositorio do dataset e o artigo de origem -- apenas acelerometro, "
-        "aceleracao linear, giroscopio e magnetometro do smartphone foram registrados; "
-        "o velocimetro do veiculo aparece somente no video de referencia usado para "
-        "rotulagem manual, nunca como campo de dado. O criterio de excesso de "
-        "velocidade do firmware nao pode ser validado com estes dados.\n"
-        "- **Mudanca de faixa fora de escopo**: um no de acelerometro + GPS unico nao "
-        "e capaz de detectar mudanca de faixa (falta dado de direcao/esterco), entao "
-        "essas linhas sao excluidas da avaliacao, nao descartadas silenciosamente.\n"
-        "- **Amostra pequena**: n=55 janelas no total, ate 6 na menor categoria -- "
-        "leia todo resultado acima como verificacao de viabilidade, nao como validacao "
-        "estatisticamente dimensionada.\n"
-        "- **Confundimento categoria/sessao**: ver nota acima -- nem toda sessao "
-        "(GroupID) contem toda categoria de evento.\n"
-        "- **Proxy de pico, nao amostra bruta**: como a fonte so fornece estatisticas "
-        "por janela (nao o sinal bruto por amostra), o pico dinamico usado aqui e "
-        "aproximado pelo desvio Max/Min em relacao a Media da janela, nao pela deteccao "
-        "de pico instantaneo que o firmware faz sobre o sinal continuo."
-    )
+def render_grafico_motoristas(conduta: pd.DataFrame):
+    dados = conduta.copy()
+    dados["CategoriaLabel"] = dados["EventCategory"].map(CATEGORIA_LABEL).fillna(dados["EventCategory"])
+    agregado = dados.groupby(["GroupID", "CategoriaLabel"]).size().reset_index(name="n_eventos")
+
+    grafico = alt.Chart(agregado).mark_bar(cornerRadiusTopLeft=4, cornerRadiusTopRight=4).encode(
+        x=alt.X("GroupID:N", title=None, axis=alt.Axis(labelAngle=0)),
+        y=alt.Y("n_eventos:Q", title="Numero de eventos"),
+        color=alt.Color("CategoriaLabel:N", title="Categoria"),
+        xOffset="CategoriaLabel:N",
+        tooltip=["GroupID", "CategoriaLabel", "n_eventos"],
+    ).properties(height=300)
+    st.altair_chart(grafico, width="stretch")
 
 
 def render_tabela_motoristas(conduta: pd.DataFrame):
@@ -621,9 +601,19 @@ def render_tabela_motoristas(conduta: pd.DataFrame):
         tabela, width="stretch", hide_index=True,
         column_config={"Aceleracao de pico (m/s^2)": st.column_config.NumberColumn(format="%.2f")},
     )
+    st.caption(
+        "**Legenda:** `Motorista` -- identificador anonimo da sessao de gravacao no "
+        "dataset publico (nao e uma pessoa identificada). `Categoria` -- tipo de "
+        "manobra harmonizado pelo firmware (Aceleracao, Frenagem, Curva, Nao "
+        "agressivo, Mudanca de faixa). `Janela` -- indice da janela de tempo rotulada "
+        "dentro daquela sessao. `Aceleracao de pico` -- magnitude dinamica maxima "
+        "medida naquela janela, em m/s^2, com a gravidade ja removida. `Acima do "
+        "limiar` -- se essa magnitude ultrapassa o limiar de deteccao do firmware "
+        "(~6 m/s^2)."
+    )
 
 
-def render_view_validacao_hardware(conduta, metricas, confound):
+def render_view_validacao_hardware(conduta, metricas):
     if conduta is None or metricas is None:
         st.error(
             "Nenhum resultado de validacao de hardware encontrado em data/processed/. "
@@ -634,19 +624,15 @@ def render_view_validacao_hardware(conduta, metricas, confound):
     render_metodologia_hardware()
 
     # Matriz de confusao (render_confusao) desativada por pedido -- por
-    # enquanto mostra so a tabela bruta dos motoristas abaixo. Funcao mantida
-    # para reativacao futura.
+    # enquanto mostra so o resumo/grafico/tabela dos motoristas abaixo.
+    # Funcao mantida para reativacao futura.
     with st.container(border=True):
+        render_resumo_motoristas(conduta)
+        render_grafico_motoristas(conduta)
         render_tabela_motoristas(conduta)
 
     with st.container(border=True):
         render_recall_por_categoria(metricas)
-
-    if confound is not None and not confound.empty:
-        with st.container(border=True):
-            render_confundimento_sessao(confound)
-
-    render_limitacoes_hardware()
 
 
 # ---------------------------------------------------------------------------
@@ -865,7 +851,6 @@ def main():
     validacao_k = carregar_validacao_k()
     conduta = carregar_conduta_harmonizada()
     metricas = carregar_conduta_metricas()
-    confound = carregar_conduta_confound()
 
     projecao, variancia_pct = projetar_pca(normalizada)
     projecao = projecao.merge(
@@ -884,7 +869,7 @@ def main():
             projecao, variancia_pct, kpis_cluster, gerais, significancia, normalizada, validacao_k
         )
     with aba_hardware:
-        render_view_validacao_hardware(conduta, metricas, confound)
+        render_view_validacao_hardware(conduta, metricas)
     with aba_coligacao:
         render_view_coligacao(original, mapa_perfil, conduta)
 
