@@ -643,6 +643,50 @@ def render_view_coligacao(original: pd.DataFrame, mapa_perfil: dict, conduta: pd
         unsafe_allow_html=True,
     )
 
+    st.markdown("##### Como a coligacao funcionaria (arquitetura conceitual, Secao 2.2.5/3.4)")
+    st.caption(
+        "Este diagrama descreve o MECANISMO de token/pseudonimizacao do design do "
+        "projeto -- nenhuma destas etapas esta implementada neste codigo (nao ha "
+        "sistema de tokens, ingestao de telemetria ou reassociacao rodando aqui). "
+        "E a arquitetura de producao descrita no texto do TCC, mostrada para "
+        "explicar como um vinculo REAL seria possivel sem expor a identidade da "
+        "apolice ao dispositivo nem ao pipeline de telemetria (LGPD, minimizacao de "
+        "dados -- Parte C)."
+    )
+    st.graphviz_chart(
+        """
+        digraph fluxo {
+            rankdir=LR;
+            bgcolor="transparent";
+            node [shape=box, style="rounded,filled", fontname="Helvetica", fontsize=11, margin=0.18];
+            edge [fontname="Helvetica", fontsize=9, color="#8a7f97", fontcolor="#65596f"];
+
+            perfil [label="Perfil historico\n(cotacao/apolice)\nclassificado Perfil 1/2/3", fillcolor="#e87ba4", fontcolor="white"];
+            token [label="Token pseudonimo\nassociado a frota/veiculo\n(nunca o numero da apolice)", fillcolor="#f6e6ee", fontcolor="#44355b"];
+            dispositivo [label="Dispositivo ESP32\nna frota\n(so ve o token)", fillcolor="#2a78d6", fontcolor="white"];
+            ingestao [label="Ingestao de telemetria\nrecebe token + evento\nresumido (nunca GPS bruto)", fillcolor="#f6e6ee", fontcolor="#44355b"];
+            reassociacao [label="Reassociacao\nso a seguradora tem o\nmapa token -> apolice", fillcolor="#f6e6ee", fontcolor="#44355b"];
+            classificacao [label="Classificacao\nreforcada ou corrigida\n(decisao com humano no loop)", fillcolor="#008300", fontcolor="white"];
+
+            perfil -> token [label="  emissao do token  "];
+            token -> dispositivo [label="  gravado no dispositivo  "];
+            dispositivo -> ingestao [label="  eventos + token  "];
+            ingestao -> reassociacao [label="  lookup do token  "];
+            reassociacao -> classificacao [label="  feedback  "];
+            classificacao -> perfil [label="  atualiza o perfil  ", style=dashed, color="#c2185b", fontcolor="#c2185b"];
+        }
+        """
+    )
+    st.caption(
+        "O passo critico de privacidade e 'Reassociacao': o dispositivo e o pipeline "
+        "de ingestao nunca veem o numero da apolice, so o token -- somente a "
+        "seguradora, que emitiu o token, consegue voltar do token ate a apolice. "
+        "A seta tracejada de volta a 'Classificacao' e o loop de feedback descrito "
+        "na Secao 3.4.1: e sempre um sinal de apoio a decisao, nunca uma decisao "
+        "automatica (Parte C, LGPD Art. 20)."
+    )
+    st.divider()
+
     if conduta is None or conduta.empty:
         st.info("Execute src/validacao_hardware.py para habilitar o exemplo ilustrativo.")
         return
