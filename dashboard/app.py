@@ -130,19 +130,6 @@ def carregar_conduta_confound():
     return pd.read_csv(caminho) if caminho.exists() else None
 
 
-@st.cache_data
-def carregar_delta_v():
-    """Variacao de velocidade (delta-v) por evento de aceleracao/frenagem,
-    CALCULADA por integracao da aceleracao real (numero de amostras da
-    janela recuperado do proprio dado, baseline de sessao a partir de
-    janelas reais NON_AGGRESSIVE) por src/calcular_delta_v_conduta.py --
-    a unica constante nao medida neste arquivo e a taxa de amostragem
-    citada (ver docstring daquele script). Nao ha variavel simulada por
-    regra de negocio."""
-    caminho = DADOS_DIR / "conduta_delta_v.csv"
-    return pd.read_csv(caminho) if caminho.exists() else None
-
-
 def projetar_pca(normalizada: pd.DataFrame) -> tuple[pd.DataFrame, float]:
     pca = PCA(n_components=2, random_state=42)
     componentes = pca.fit_transform(normalizada[COLUNAS_19])
@@ -612,57 +599,7 @@ def render_limitacoes_hardware():
     )
 
 
-def render_delta_v(delta_v: pd.DataFrame):
-    st.markdown("##### Variacao de velocidade (delta-v) por evento")
-    st.caption(
-        "Calculado por integracao da propria aceleracao do evento -- nao simulado. "
-        "O numero de amostras da janela e a media da aceleracao dinamica (com a "
-        "gravidade/offset de montagem removidos via janelas reais de linha de base "
-        "da mesma sessao) vem do dado medido; a duracao usa uma taxa de amostragem "
-        "citada da literatura (nao medida neste arquivo), com a sensibilidade a essa "
-        "taxa reportada ao rodar `src/calcular_delta_v_conduta.py`. Isto e uma "
-        "variacao de velocidade, nao uma velocidade absoluta -- a fonte nao tem "
-        "canal de velocidade/GPS para fornecer um ponto de partida."
-    )
-
-    dados = delta_v.copy()
-    dados["CategoriaLabel"] = dados["EventCategory"].map(CATEGORIA_LABEL)
-    dados["EventoId"] = (
-        dados["CategoriaLabel"] + " #" + (dados.groupby("EventCategory").cumcount() + 1).astype(str)
-    )
-    ordem_eventos = dados.sort_values(["EventCategory", "EventoId"])["EventoId"].tolist()
-
-    grafico = alt.Chart(dados).mark_bar(cornerRadiusEnd=4).encode(
-        y=alt.Y("EventoId:N", sort=ordem_eventos, title=None),
-        x=alt.X("delta_v_kmh:Q", title="Delta-v (km/h)"),
-        color=alt.Color(
-            "CategoriaLabel:N", title="Categoria",
-            scale=alt.Scale(domain=["Aceleracao", "Frenagem"], range=[CORES_PERFIL[3], CORES_PERFIL[1]]),
-        ),
-        tooltip=["EventoId", "n_amostras", alt.Tooltip("duracao_evento_s:Q", format=".2f", title="Duracao (s)"),
-                 alt.Tooltip("delta_v_kmh:Q", format=".1f")],
-    ).properties(height=320)
-    st.altair_chart(grafico, width="stretch")
-
-    tabela = dados[[
-        "EventoId", "n_amostras", "duracao_evento_s",
-        "aceleracao_dinamica_media_mps2", "delta_v_kmh",
-    ]].copy()
-    tabela.columns = [
-        "Evento", "Amostras (real)", "Duracao (s)",
-        "Aceleracao dinamica media (m/s^2, real)", "Delta-v (km/h, calculado)",
-    ]
-    st.dataframe(
-        tabela, width="stretch", hide_index=True,
-        column_config={
-            "Duracao (s)": st.column_config.NumberColumn(format="%.2f"),
-            "Aceleracao dinamica media (m/s^2, real)": st.column_config.NumberColumn(format="%.2f"),
-            "Delta-v (km/h, calculado)": st.column_config.NumberColumn(format="%.1f"),
-        },
-    )
-
-
-def render_view_validacao_hardware(conduta, metricas, confound, delta_v):
+def render_view_validacao_hardware(conduta, metricas, confound):
     if conduta is None or metricas is None:
         st.error(
             "Nenhum resultado de validacao de hardware encontrado em data/processed/. "
@@ -683,11 +620,6 @@ def render_view_validacao_hardware(conduta, metricas, confound, delta_v):
             render_confundimento_sessao(confound)
 
     render_limitacoes_hardware()
-
-    if delta_v is not None and not delta_v.empty:
-        st.divider()
-        with st.container(border=True):
-            render_delta_v(delta_v)
 
 
 # ---------------------------------------------------------------------------
@@ -781,7 +713,6 @@ def render_view_exportar():
         "Conduta harmonizada por janela (Ferreira Jr. et al., 2017)": "driver_conduct_harmonized.csv",
         "Metricas de discriminacao (pooled + por categoria)": "driver_conduct_metrics.csv",
         "Confundimento categoria x sessao (GroupID)": "driver_conduct_confound.csv",
-        "Delta-v calculado por evento de aceleracao/frenagem": "conduta_delta_v.csv",
     }
     for titulo, nome_arquivo in arquivos.items():
         caminho = DADOS_DIR / nome_arquivo
@@ -831,7 +762,6 @@ def main():
     conduta = carregar_conduta_harmonizada()
     metricas = carregar_conduta_metricas()
     confound = carregar_conduta_confound()
-    delta_v = carregar_delta_v()
 
     projecao, variancia_pct = projetar_pca(normalizada)
     projecao = projecao.merge(
@@ -850,7 +780,7 @@ def main():
             projecao, variancia_pct, kpis_cluster, gerais, significancia, normalizada, validacao_k
         )
     with aba_hardware:
-        render_view_validacao_hardware(conduta, metricas, confound, delta_v)
+        render_view_validacao_hardware(conduta, metricas, confound)
     with aba_coligacao:
         render_view_coligacao(original, mapa_perfil, conduta)
 
