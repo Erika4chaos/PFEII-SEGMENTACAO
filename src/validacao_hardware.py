@@ -2,22 +2,43 @@
 validacao_hardware.py
 
 Validates the firmware's acceleration-magnitude threshold logic (~6 m/s^2,
-per MASELLO et al., 2025; BRUHWILER et al., 2022) against two combined
-public driving-behavior datasets, replacing the now-unavailable UAH-DriveSet.
+per MASELLO et al., 2025; BRUHWILER et al., 2022) against a public
+driving-behavior dataset, replacing the now-unavailable UAH-DriveSet.
 
-Sources (see Seção 3.3 / Part B.5 of the technical spec):
-  - Yuksel, A. S. (2021). Driving Behavior Dataset. Mendeley Data, V3.
-    DOI: 10.17632/jj3tw8kj6h.3
-  - Ferreira Jr., J. et al. (2017). Driver behavior profiling: An
-    investigation with different smartphone sensors and machine learning.
-    PLoS ONE, 12(4), e0174959.
+Source (see Seção 3.3 / Part B.5 of the technical spec):
+  - Ferreira Jr., J.; Carvalho, E.; Ferreira, B. V.; Souza, C. de;
+    Suhara, Y.; Pentland, A.; Pessin, G. (2017). Driver behavior
+    profiling: An investigation with different smartphone sensors and
+    machine learning. PLoS ONE, 12(4), e0174959.
+    Dataset: github.com/jair-jr/driverBehaviorDataset
 
-This script is a DISCRIMINATION validation, not a continuous-stream
-DETECTION validation: the input is already pre-segmented into labeled
-event windows (statistical features per window), not a raw continuous
-signal. See docstring notes inline for why this reframing is a closer
-match to what the ESP32 firmware itself produces (summarized events,
-never a raw stream).
+A single-source dataset was chosen over combining it with a second
+Kaggle/Mendeley source (Yuksel, 2021) after an initial two-source run
+surfaced two problems specific to that combination: (1) the two sources
+turned out to be in different physical units (g vs m/s^2), requiring a
+harmonization step verified only empirically, since neither source's own
+documentation could be trusted at face value; and (2) the Yuksel source's
+"Sudden X" labels appear to be assigned per recording session rather than
+per window (near-flat peak-deviation statistics across ~250 consecutive
+windows under one label), which is a weaker ground truth than Ferreira
+Jr.'s labels — timestamped by researchers watching a reference video of
+the driver deliberately performing each maneuver. Ferreira Jr. alone also
+has the one property the validation actually needs most: a genuine
+"Non-aggressive event" baseline class, enabling real positive/negative
+discrimination rather than only within-"harsh" category comparison.
+
+Trade-off accepted explicitly: n=55 windows total (as few as 3 per
+class) is a small-sample feasibility check, not a statistically powered
+validation — report it that way, in the same spirit as the bench
+tests/road tests in the author's own vehicle (Seção 3.3).
+
+Note: this source has NO GPS or speed data (confirmed against the
+dataset repository and the source paper) — only accelerometer, linear
+acceleration, gyroscope, and magnetometer from the recording smartphone.
+The vehicle's speedometer appears only in the reference video used for
+manual labeling, never as a machine-readable field. Speed-linked
+validation (e.g., the "excesso de velocidade" criterion) remains out of
+scope regardless of source choice.
 """
 
 import numpy as np
@@ -26,66 +47,45 @@ import pandas as pd
 RAW_PATH = "data/raw/combined_normalized_driver_conduct.csv"
 OUT_PATH = "data/processed/driver_conduct_harmonized.csv"
 METRICS_PATH = "data/processed/driver_conduct_metrics.csv"
+CONFOUND_PATH = "data/processed/driver_conduct_confound.csv"
+SOURCE_NAME = "jair_jr_driverBehaviorDataset_2016"
 
-G_TO_MPS2 = 9.80665
 HARSH_THRESHOLD_MPS2 = 6.0  # literature threshold (Masello et al., 2025; Bruhwiler et al., 2022)
 
 # ---------------------------------------------------------------------------
-# Step 1 — Load
+# Step 1 — Load and restrict to the single chosen source.
 # ---------------------------------------------------------------------------
-df = pd.read_csv(RAW_PATH)
+df_all = pd.read_csv(RAW_PATH)
+df = df_all[df_all["SourceDataset"] == SOURCE_NAME].copy()
+print(f"=== Step 1: {len(df)} windows loaded from {SOURCE_NAME} "
+      f"(out of {len(df_all)} in the combined raw file) ===")
 
 RAW_ACC_COLS = [c for c in df.columns
                 if c.startswith("Acc") and not c.endswith("_z")]
 
 # ---------------------------------------------------------------------------
-# Step 2 — Empirically verify the physical unit scale of each source
-# (do NOT trust either source's documentation at face value — see Part B.5).
-# Proxy for a near-steady/idle-like window: lowest decile of resultant
-# acceleration variance magnitude within each source.
+# Step 2 — Empirical unit check (still worth doing even for one source —
+# never assume documented units are correct without checking).
 # ---------------------------------------------------------------------------
 acc_var_cols = ["AccVarX", "AccVarY", "AccVarZ"]
 df["_AccVarMag"] = np.sqrt((df[acc_var_cols] ** 2).sum(axis=1))
 df["_AccMagMean_raw"] = np.sqrt(
     df["AccMeanX"] ** 2 + df["AccMeanY"] ** 2 + df["AccMeanZ"] ** 2
 )
-
-print("=== Step 2: empirical unit check per source ===")
-unit_scale = {}
-for src, g in df.groupby("SourceDataset"):
-    low_var_thresh = g["_AccVarMag"].quantile(0.10)
-    steady = g[g["_AccVarMag"] <= low_var_thresh]
-    steady_mag = steady["_AccMagMean_raw"].mean()
-    # gravity is ~1 in g-scale, ~9.8 in m/s^2-scale — pick whichever is closer
-    scale = "g" if abs(steady_mag - 1.0) < abs(steady_mag - G_TO_MPS2) else "m/s^2"
-    unit_scale[src] = scale
-    print(f"{src}: steady-window |Acc| = {steady_mag:.3f}  -> inferred unit = {scale}")
+low_var_thresh = df["_AccVarMag"].quantile(0.10)
+steady_mag = df.loc[df["_AccVarMag"] <= low_var_thresh, "_AccMagMean_raw"].mean()
+print(f"\n=== Step 2: empirical unit check ===")
+print(f"Steady-window |Acc| = {steady_mag:.3f} "
+      f"(~9.8 confirms m/s^2 as documented — no conversion needed)")
 
 # ---------------------------------------------------------------------------
-# Step 3 — Harmonize units: convert every g-scale source's raw Acc columns to m/s^2
-# ---------------------------------------------------------------------------
-for src, scale in unit_scale.items():
-    if scale == "g":
-        mask = df["SourceDataset"] == src
-        df.loc[mask, RAW_ACC_COLS] = df.loc[mask, RAW_ACC_COLS] * G_TO_MPS2
-
-print("\n=== Step 3: post-harmonization sanity check (should all read ~9.8) ===")
-df["_AccMagMean_mps2"] = np.sqrt(
-    df["AccMeanX"] ** 2 + df["AccMeanY"] ** 2 + df["AccMeanZ"] ** 2
-)
-print(df.groupby("SourceDataset")["_AccMagMean_mps2"].mean())
-
-# ---------------------------------------------------------------------------
-# Step 4 — Peak *dynamic* acceleration proxy (gravity/baseline-subtracted)
-#
-# The firmware never thresholds raw magnitude — Seção 2.8 subtracts a
-# calibrated gravity/baseline component first, then thresholds the
-# resulting *effective* acceleration. We don't have raw per-sample
-# vectors here (only per-window statistics), so the closest available
-# proxy is the peak deviation of Max/Min from the window Mean on each
-# axis (the window Mean approximates the roughly-constant gravity +
-# steady-cruise baseline the firmware calibrates away), combined into a
-# resultant magnitude across the three axes.
+# Step 3 — Peak *dynamic* acceleration proxy (gravity/baseline-subtracted).
+# The firmware subtracts a calibrated gravity/baseline component before
+# thresholding (Seção 2.8). We only have per-window statistics, not raw
+# per-sample vectors, so the closest available proxy is the peak deviation
+# of Max/Min from the window Mean on each axis (Mean approximates the
+# roughly-constant gravity + steady-driving baseline), combined into a
+# resultant magnitude across axes.
 # ---------------------------------------------------------------------------
 for axis in ["X", "Y", "Z"]:
     up = (df[f"AccMax{axis}"] - df[f"AccMean{axis}"]).abs()
@@ -97,16 +97,14 @@ df["PeakDynamicAccel_mps2"] = np.sqrt(
 )
 
 # ---------------------------------------------------------------------------
-# Step 5 — Harmonize label taxonomy across the two sources into shared
-# categories used by the firmware's own event classes.
+# Step 4 — Harmonize labels into the firmware's own event categories.
+# This source's taxonomy is already internally consistent (all seven
+# labels come from one study/protocol), so this is a straight mapping,
+# not a cross-source reconciliation.
 # ---------------------------------------------------------------------------
 LABEL_MAP = {
-    "Sudden Acceleration": ("ACCELERATION", "harsh"),
     "Aggressive acceleration": ("ACCELERATION", "harsh"),
-    "Sudden Break": ("BRAKING", "harsh"),
     "Aggressive braking": ("BRAKING", "harsh"),
-    "Sudden Left Turn": ("TURN", "harsh"),
-    "Sudden Right Turn": ("TURN", "harsh"),
     "Aggressive left turn": ("TURN", "harsh"),
     "Aggressive right turn": ("TURN", "harsh"),
     "Aggressive left lane change": ("LANE_CHANGE", "excluded"),
@@ -116,16 +114,16 @@ LABEL_MAP = {
 df["EventCategory"] = df["EventLabel"].map(lambda x: LABEL_MAP[x][0])
 df["ValidationRole"] = df["EventLabel"].map(lambda x: LABEL_MAP[x][1])
 
-print("\n=== Step 5: harmonized category counts (by validation role) ===")
+print("\n=== Step 4: category counts (by validation role) ===")
 print(df.groupby(["ValidationRole", "EventCategory"]).size())
+print("\nLane-change is excluded from discrimination scoring below — a single "
+      "accelerometer+GPS node without steering data cannot detect a lane "
+      "change; this is an architectural scope limit, not a dropped row.")
 
 # ---------------------------------------------------------------------------
-# Step 6 — Apply the ~6 m/s^2 threshold and score discrimination.
+# Step 5 — Apply the ~6 m/s^2 threshold and score discrimination.
 # Ground truth: 'harsh' maneuvers (accel/brake/turn) = positive;
-# 'Non-aggressive event' = negative. Lane-change is excluded — a single
-# accelerometer+GPS node without steering data is not architecturally
-# capable of detecting a lane change, so it is out of scope by design,
-# not a silently dropped row.
+# 'Non-aggressive event' = negative.
 # ---------------------------------------------------------------------------
 evalset = df[df["ValidationRole"] != "excluded"].copy()
 evalset["y_true"] = (evalset["ValidationRole"] == "harsh").astype(int)
@@ -141,51 +139,46 @@ def confusion(sub):
     f1 = 2 * precision * recall / (precision + recall) if (precision + recall) else float("nan")
     return dict(n=len(sub), tp=tp, fn=fn, tn=tn, fp=fp, precision=precision, recall=recall, f1=f1)
 
-print(f"\n=== Step 6: threshold = {HARSH_THRESHOLD_MPS2} m/s^2 on PeakDynamicAccel ===")
-print("\n-- Pooled (both sources) --")
+print(f"\n=== Step 5: threshold = {HARSH_THRESHOLD_MPS2} m/s^2 on PeakDynamicAccel ===")
+print("n =", len(evalset), "— small-sample feasibility check, report accordingly")
 print(confusion(evalset))
 
-# ---------------------------------------------------------------------------
-# Step 6b — Collect the same metrics into a flat table so the dashboard can
-# load them directly instead of recomputing (per-source AND per-category,
-# never pooled into one figure — see Part B.5, sources are ~95/5 imbalanced).
-# ---------------------------------------------------------------------------
-metrics_rows = [dict(recorte="pooled", categoria="todas", **confusion(evalset))]
+metrics_rows = [dict(categoria="todas", **confusion(evalset))]
 
-print("\n-- Per source (imbalance: report separately, do not pool blindly) --")
-for src, sub in evalset.groupby("SourceDataset"):
-    print(src)
-    print(" ", confusion(sub))
-    metrics_rows.append(dict(recorte=src, categoria="todas", **confusion(sub)))
-
-print("\n-- Per harmonized category (recall within 'harsh' classes only) --")
+print("\n-- Per harmonized category (recall within 'harsh' classes; n as low as 6, "
+      "read as directional, not statistically powered) --")
 for cat, sub in evalset[evalset.ValidationRole == "harsh"].groupby("EventCategory"):
     recall = (sub.y_pred == 1).mean()
     print(f"  {cat}: n={len(sub)}  recall={recall:.3f}")
-    metrics_rows.append(dict(recorte="pooled", categoria=cat, n=len(sub), recall=recall))
-    for src, sub_src in sub.groupby("SourceDataset"):
-        recall_src = (sub_src.y_pred == 1).mean()
-        metrics_rows.append(dict(recorte=src, categoria=cat, n=len(sub_src), recall=recall_src))
+    metrics_rows.append(dict(categoria=cat, n=len(sub), recall=recall))
 
 pd.DataFrame(metrics_rows).to_csv(METRICS_PATH, index=False)
 print(f"\nMetrics table written to {METRICS_PATH}.")
 
 # ---------------------------------------------------------------------------
-# Step 7 — Persist the harmonized dataset for reuse (e.g., by the dashboard).
-# Keeps both the pre-harmonization (_AccMagMean_raw) and post-harmonization
-# magnitude so a consumer can render a before/after unit-harmonization audit
-# view without re-deriving the g-vs-m/s^2 detection logic itself.
+# Step 5b — Driver/session (GroupID) confound: record, per harmonized
+# category, which recording session(s) it comes from. Persisted (not just
+# printed) so the dashboard can show the confound with real counts instead
+# of a static caption — see Part B.5: "not every GroupID session contains
+# every event category ... do not present per-driver conclusions".
+# ---------------------------------------------------------------------------
+confound = df.groupby(["EventCategory", "GroupID"]).size().reset_index(name="n")
+confound["n_sessions_com_categoria"] = confound.groupby("EventCategory")["GroupID"].transform("nunique")
+confound.to_csv(CONFOUND_PATH, index=False)
+print(f"\n-- Per driver/session (GroupID) — descriptive only, not enough n for per-group metrics --")
+print(df.groupby("GroupID")["EventCategory"].value_counts())
+print(f"Confound table written to {CONFOUND_PATH}.")
+
+# ---------------------------------------------------------------------------
+# Step 6 — Persist the harmonized single-source dataset.
 # ---------------------------------------------------------------------------
 keep_cols = (
     ["SourceDataset", "GroupID", "EventLabel", "EventCategory", "ValidationRole",
      "WindowIndex"]
     + RAW_ACC_COLS
-    + ["PeakDynamicAccel_mps2", "_AccMagMean_raw", "_AccMagMean_mps2"]
+    + ["PeakDynamicAccel_mps2", "_AccMagMean_raw"]
 )
-out = df[keep_cols].rename(columns={
-    "_AccMagMean_raw": "AccMagMean_raw",
-    "_AccMagMean_mps2": "AccMagMean_mps2",
-})
+out = df[keep_cols].rename(columns={"_AccMagMean_raw": "AccMagMean_mps2"})
 out["HarshPredicted_6mps2"] = (out["PeakDynamicAccel_mps2"] > HARSH_THRESHOLD_MPS2).astype(int)
 out.to_csv(OUT_PATH, index=False)
 print(f"\nHarmonized dataset written to {OUT_PATH} ({len(out)} rows, {len(out.columns)} columns).")

@@ -2,8 +2,9 @@
 Etapa 4 (Secao 3.5.4): dashboard Streamlit com tres abas -- Segmentacao
 (projecao PCA 2D dos clusters, tabela de perfis, KPIs e indices de validacao
 tecnica), Validacao de Hardware (discriminacao do limiar de ~6 m/s^2 do
-firmware contra os datasets publicos de conducao) e Coligacao Conceitual
-(passeio ilustrativo perfil x evento de hardware, sem juncao real de dados).
+firmware contra o dataset publico de conducao de Ferreira Jr. et al., 2017)
+e Coligacao Conceitual (passeio ilustrativo perfil x evento de hardware,
+sem juncao real de dados).
 
 Uso:
     streamlit run dashboard/app.py
@@ -43,15 +44,15 @@ NOME_PERFIL = {
 CORES_PERFIL = {1: "#e87ba4", 2: "#2a78d6", 3: "#008300"}
 COR_LINHA_DESTAQUE = "#c2185b"
 
-# Nomes de citacao academica para as duas fontes publicas de validacao de
-# hardware (ver Part B.5 do escopo tecnico) -- os valores brutos de
-# SourceDataset em driver_conduct_harmonized.csv sao identificadores de
-# arquivo, nao a citacao a exibir na UI.
-FONTE_LABEL = {
-    "Yuksel_Atmaca_2020_DrivingBehaviorDataset": "Yuksel (2021)",
-    "jair_jr_driverBehaviorDataset_2016": "Ferreira Jr. et al. (2017)",
-}
-CORES_FONTE = {"Yuksel (2021)": "#2a78d6", "Ferreira Jr. et al. (2017)": "#e87ba4"}
+# Citacao academica da fonte publica unica de validacao de hardware (Part
+# B.5 do escopo tecnico) -- o valor bruto de SourceDataset em
+# driver_conduct_harmonized.csv e um identificador de arquivo, nao a
+# citacao a exibir na UI. Um segundo dataset (Yuksel, 2021) foi avaliado e
+# deliberadamente descartado (unidades divergentes, rotulos com evidencia
+# de serem por sessao de gravacao, nao por janela) -- ver docstring de
+# src/validacao_hardware.py; nao reintroduzir sem repetir essa checagem.
+FONTE_LABEL = {"jair_jr_driverBehaviorDataset_2016": "Ferreira Jr. et al. (2017)"}
+FONTE_CITACAO = FONTE_LABEL["jair_jr_driverBehaviorDataset_2016"]
 
 CATEGORIA_LABEL = {
     "ACCELERATION": "Aceleracao", "BRAKING": "Frenagem", "TURN": "Curva",
@@ -96,9 +97,11 @@ def carregar_significancia():
 @st.cache_data
 def carregar_conduta_harmonizada():
     """Le a saida ja harmonizada (unidades + rotulos) de
-    src/validacao_hardware.py -- o dashboard nunca reimplementa a deteccao
-    de escala g/m/s^2 nem o mapeamento de rotulos, apenas consome o CSV que
-    o script produz (ver Part B.5/A.7 do escopo tecnico)."""
+    src/validacao_hardware.py, ja restrita a fonte unica escolhida
+    (Ferreira Jr. et al., 2017) -- o dashboard nunca reimplementa a
+    verificacao de escala m/s^2 nem o mapeamento de rotulos, apenas
+    consome o CSV que o script produz (ver Part B.5/A.7 do escopo
+    tecnico)."""
     caminho = DADOS_DIR / "driver_conduct_harmonized.csv"
     if not caminho.exists():
         return None
@@ -109,16 +112,22 @@ def carregar_conduta_harmonizada():
 
 @st.cache_data
 def carregar_conduta_metricas():
-    """Matriz de confusao / precisao / recall / F1 por fonte e por
-    categoria, ja calculada por src/validacao_hardware.py (Step 6b) --
-    reaproveitada aqui, nunca recalculada, para nao duplicar a logica de
-    avaliacao entre script e dashboard."""
+    """Matriz de confusao / precisao / recall / F1 (pooled + por categoria
+    harmonizada), ja calculada por src/validacao_hardware.py -- reaproveitada
+    aqui, nunca recalculada, para nao duplicar a logica de avaliacao entre
+    script e dashboard."""
     caminho = DADOS_DIR / "driver_conduct_metrics.csv"
-    if not caminho.exists():
-        return None
-    df = pd.read_csv(caminho)
-    df["FonteLabel"] = df["recorte"].map(FONTE_LABEL).fillna(df["recorte"])
-    return df
+    return pd.read_csv(caminho) if caminho.exists() else None
+
+
+@st.cache_data
+def carregar_conduta_confound():
+    """Contagem de janelas por categoria harmonizada x sessao de gravacao
+    (GroupID), ja calculada por src/validacao_hardware.py -- evidencia o
+    confundimento categoria/sessao (ex.: aceleracao e frenagem so aparecem
+    em uma das tres sessoes) sem o dashboard recalcular nada."""
+    caminho = DADOS_DIR / "driver_conduct_confound.csv"
+    return pd.read_csv(caminho) if caminho.exists() else None
 
 
 def projetar_pca(normalizada: pd.DataFrame) -> tuple[pd.DataFrame, float]:
@@ -483,135 +492,114 @@ def render_metodologia_hardware():
         "**Substituicao de fonte de dados (documentada, nao um desvio silencioso).** "
         "O plano original validava o firmware contra o UAH-DriveSet (ROMERA; BERGASA; "
         "ARROYO, 2016), cujo host oficial e espelhos conhecidos ficaram indisponiveis "
-        "durante a execucao do PFE II. As fontes de substituicao -- Yuksel (2021) e "
-        "Ferreira Jr. et al. (2017) -- fornecem janelas estatisticas ja pre-extraidas "
-        "por evento (media, maximo, minimo, variancia, assimetria, curtose, desvio "
-        "padrao por eixo), nao um fluxo continuo bruto com rotulo de trajeto. Por isso "
-        "a validacao aqui e de **discriminacao do tipo de evento a partir de "
-        "estatisticas de janela**, e nao de deteccao em fluxo continuo -- o que, na "
-        "verdade, aproxima-se mais do que o proprio firmware produz (eventos "
-        "resumidos, nunca o fluxo bruto)."
+        f"durante a execucao do PFE II. A fonte de substituicao -- {FONTE_CITACAO} -- "
+        "fornece janelas estatisticas ja pre-extraidas por evento (media, maximo, "
+        "minimo, variancia, assimetria, curtose, desvio padrao por eixo), nao um fluxo "
+        "continuo bruto com rotulo de trajeto. Por isso a validacao aqui e de "
+        "**discriminacao do tipo de evento a partir de estatisticas de janela**, e nao "
+        "de deteccao em fluxo continuo -- o que, na verdade, aproxima-se mais do que o "
+        "proprio firmware produz (eventos resumidos, nunca o fluxo bruto)."
     )
-
-
-def render_harmonizacao_unidades(conduta: pd.DataFrame):
-    st.markdown("##### Auditoria da harmonizacao de unidades")
     st.caption(
-        "Magnitude resultante media por fonte, antes (escala bruta declarada por cada "
-        "fonte) e depois da conversao empirica g -> m/s^2 (x9,80665). A fonte Yuksel "
-        "(2021) documenta saida em m/s^2, mas o valor observado em janelas de baixa "
-        "variancia (~1,0) e consistente com g -- por isso a conversao e feita por "
-        "verificacao empirica, nunca por confianca cega na documentacao da fonte "
-        "(ver Part B.5)."
+        "Uma segunda fonte (Yuksel, 2021) foi avaliada e descartada deliberadamente: "
+        "suas unidades divergiam do documentado (exigindo harmonizacao empirica "
+        "fragil) e seus rotulos mostravam estatisticas de pico quase constantes ao "
+        "longo de dezenas de janelas consecutivas, sinal de rotulagem por sessao de "
+        "gravacao e nao por janela -- uma evidencia mais fraca que a rotulagem de "
+        f"{FONTE_CITACAO}, feita por pesquisadores contra video de referencia. "
+        "Ver docstring de `src/validacao_hardware.py`."
     )
 
-    antes = conduta[["FonteLabel", "AccMagMean_raw"]].rename(columns={"AccMagMean_raw": "Magnitude"})
-    antes["Etapa"] = "Antes (escala bruta)"
-    depois = conduta[["FonteLabel", "AccMagMean_mps2"]].rename(columns={"AccMagMean_mps2": "Magnitude"})
-    depois["Etapa"] = "Depois (m/s^2)"
-    comparativo = pd.concat([antes, depois], ignore_index=True)
 
-    grafico = alt.Chart(comparativo).mark_boxplot(size=28).encode(
-        x=alt.X("Etapa:N", title=None, sort=["Antes (escala bruta)", "Depois (m/s^2)"]),
-        y=alt.Y("Magnitude:Q", title="Magnitude media da janela"),
-        color=alt.Color(
-            "FonteLabel:N", title="Fonte",
-            scale=alt.Scale(domain=list(CORES_FONTE.keys()), range=list(CORES_FONTE.values())),
-        ),
-        column=alt.Column("FonteLabel:N", title=None),
-    ).properties(height=280, width=220)
-    st.altair_chart(grafico, width="content")
+def render_confusao(metricas: pd.DataFrame):
+    st.markdown("##### Matriz de confusao e metricas de discriminacao")
+    linha = metricas[metricas["categoria"] == "todas"].iloc[0]
     st.caption(
-        "Apos a conversao, ambas as fontes convergem para ~9,8 m/s^2 (gravidade em "
-        "repouso), confirmando que a harmonizacao foi aplicada corretamente antes de "
-        "qualquer limiar fisico absoluto ser usado."
+        f"n = {int(linha['n'])} janelas avaliadas -- verificacao de viabilidade em "
+        "amostra pequena, na mesma postura ja adotada pelos testes de bancada e rodagem "
+        "no veiculo do autor (Secao 3.3), nao uma validacao estatisticamente "
+        "dimensionada."
     )
-
-
-def render_confusao_por_fonte(metricas: pd.DataFrame):
-    st.markdown("##### Matriz de confusao e metricas por fonte")
-    st.caption(
-        "Reportado por fonte, nunca em uma figura unica -- as duas fontes sao "
-        "desbalanceadas em ~95/5 (1.102 janelas Yuksel vs. 55 Ferreira Jr.), e um "
-        "pool ingenuo seria dominado pela maior."
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("n", int(linha["n"]))
+    col2.metric("Precisao", f"{linha['precision']:.1%}")
+    col3.metric("Recall", f"{linha['recall']:.1%}")
+    col4.metric("F1", f"{linha['f1']:.3f}")
+    st.markdown(
+        f"VP={int(linha['tp'])} · FN={int(linha['fn'])} · "
+        f"VN={int(linha['tn'])} · FP={int(linha['fp'])}"
     )
-    linhas_fonte = metricas[(metricas["categoria"] == "todas") & (metricas["recorte"] != "pooled")]
-    colunas = st.columns(len(linhas_fonte))
-    for coluna, (_, linha) in zip(colunas, linhas_fonte.iterrows()):
-        with coluna:
-            with st.container(border=True):
-                st.markdown(f"**{linha['FonteLabel']}**")
-                st.caption(f"n = {int(linha['n'])} janelas")
-                st.metric("Precisao", f"{linha['precision']:.1%}")
-                st.metric("Recall", f"{linha['recall']:.1%}")
-                st.metric("F1", f"{linha['f1']:.3f}")
-                st.markdown(
-                    f"VP={int(linha['tp'])} · FN={int(linha['fn'])} · "
-                    f"VN={int(linha['tn'])} · FP={int(linha['fp'])}"
-                )
 
 
 def render_recall_por_categoria(metricas: pd.DataFrame):
-    st.markdown("##### Recall por categoria harmonizada de evento, por fonte")
+    st.markdown("##### Recall por categoria harmonizada de evento")
     st.caption(
         "ACCELERATION / BRAKING / TURN sao as categorias que o firmware efetivamente "
-        "classifica. O recall varia fortemente entre fonte e categoria -- isso e "
-        "reportado como achado, nao suavizado por media."
+        "classifica. O n de cada categoria e mostrado junto ao recall -- ate 6 janelas "
+        "em algumas classes -- para que a leitura nao pareca mais robusta do que e."
     )
-    dados = metricas[
-        (metricas["categoria"] != "todas") & (metricas["recorte"] != "pooled")
-    ].copy()
+    dados = metricas[metricas["categoria"] != "todas"].copy()
     dados["CategoriaLabel"] = dados["categoria"].map(CATEGORIA_LABEL)
+    dados["RotuloEixo"] = dados["CategoriaLabel"] + " (n=" + dados["n"].astype(int).astype(str) + ")"
 
-    grafico = alt.Chart(dados).mark_bar(cornerRadiusTopLeft=6, cornerRadiusTopRight=6).encode(
-        x=alt.X("CategoriaLabel:N", title=None, axis=alt.Axis(labelAngle=0)),
+    grafico = alt.Chart(dados).mark_bar(
+        cornerRadiusTopLeft=6, cornerRadiusTopRight=6, color=CORES_PERFIL[1],
+    ).encode(
+        x=alt.X("RotuloEixo:N", title=None, axis=alt.Axis(labelAngle=0)),
         y=alt.Y("recall:Q", title="Recall", axis=alt.Axis(format="%")),
-        color=alt.Color(
-            "FonteLabel:N", title="Fonte",
-            scale=alt.Scale(domain=list(CORES_FONTE.keys()), range=list(CORES_FONTE.values())),
-        ),
-        xOffset="FonteLabel:N",
-        tooltip=["FonteLabel", "CategoriaLabel", alt.Tooltip("recall:Q", format=".1%"), "n"],
-    ).properties(height=300)
+        tooltip=["CategoriaLabel", "n", alt.Tooltip("recall:Q", format=".1%")],
+    ).properties(height=280)
     st.altair_chart(grafico, width="stretch")
 
-    gap = dados.pivot(index="CategoriaLabel", columns="FonteLabel", values="recall")
-    if "Yuksel (2021)" in gap.columns and "Ferreira Jr. et al. (2017)" in gap.columns:
+
+def render_confundimento_sessao(confound: pd.DataFrame):
+    st.markdown("##### Confundimento entre categoria de evento e sessao de gravacao (GroupID)")
+    tabela = confound.pivot(index="EventCategory", columns="GroupID", values="n").fillna(0).astype(int)
+    tabela.index = tabela.index.map(lambda c: CATEGORIA_LABEL.get(c, c))
+    st.dataframe(tabela, width="stretch")
+
+    so_uma_sessao = confound[confound["n_sessions_com_categoria"] == 1]
+    categorias_confundidas = sorted(
+        {CATEGORIA_LABEL.get(c, c) for c in so_uma_sessao["EventCategory"].unique()}
+    )
+    if categorias_confundidas:
         st.warning(
-            "**Achado a reportar, nao a ocultar:** o recall e sistematicamente muito "
-            "mais baixo em Yuksel (2021) do que em Ferreira Jr. et al. (2017) em todas "
-            "as categorias. Causas plausiveis: o limiar de literatura (~6 m/s^2) foi "
-            "calibrado sobre sinal bruto de alta taxa de amostragem, enquanto Yuksel "
-            "(2021) tem taxa efetiva muito menor (~2 Hz); e a agregacao em nivel de "
-            "janela atenua picos instantaneos reais em relacao a um limiar pontual. "
-            "O limiar nao foi reajustado para melhorar esse numero -- isso invalidaria "
-            "o uso de um limiar de literatura obtido de forma independente."
+            "**Nota de confundimento (nao ocultada):** neste dataset, "
+            f"{', '.join(categorias_confundidas)} aparecem em uma unica sessao de "
+            "gravacao (GroupID) cada -- evento e sessao estao parcialmente "
+            "confundidos. Nenhuma conclusao por motorista deve ser tirada apenas "
+            "desta validacao."
         )
 
 
 def render_limitacoes_hardware():
     st.markdown("##### Limitacoes desta validacao (Secao 3.8)")
     st.warning(
-        "- **Sem validacao de sonolencia**: nenhuma das duas fontes de substituicao "
-        "possui rotulo de conducao sonolenta; esse eixo foi removido do escopo, nao "
-        "apenas nao implementado.\n"
-        "- **Sem validacao de GPS/velocidade**: nenhuma fonte inclui canal de GPS ou "
-        "velocidade; o criterio de excesso de velocidade do firmware nao pode ser "
-        "validado com estes dados.\n"
-        "- **Mudanca de faixa e 'nao agressivo' fora de escopo**: presentes apenas em "
-        "Ferreira Jr. et al. (2017); um no de acelerometro + GPS unico nao e capaz de "
-        "detectar mudanca de faixa (falta dado de direcao/esterco), entao essas linhas "
-        "sao excluidas da avaliacao, nao descartadas silenciosamente.\n"
-        "- **Desbalanceamento de fontes**: ~95% das janelas vem de Yuksel (2021); toda "
-        "metrica acima e reportada por fonte para essa assimetria nao dominar a leitura.\n"
-        "- **Proxy de pico, nao amostra bruta**: como as fontes so fornecem estatisticas "
+        "- **Sem validacao de sonolencia**: a fonte de substituicao nao possui rotulo "
+        "de conducao sonolenta; esse eixo foi removido do escopo, nao apenas nao "
+        "implementado.\n"
+        "- **Sem dado de GPS/velocidade, em nenhum momento**: confirmado contra o "
+        "repositorio do dataset e o artigo de origem -- apenas acelerometro, "
+        "aceleracao linear, giroscopio e magnetometro do smartphone foram registrados; "
+        "o velocimetro do veiculo aparece somente no video de referencia usado para "
+        "rotulagem manual, nunca como campo de dado. O criterio de excesso de "
+        "velocidade do firmware nao pode ser validado com estes dados.\n"
+        "- **Mudanca de faixa fora de escopo**: um no de acelerometro + GPS unico nao "
+        "e capaz de detectar mudanca de faixa (falta dado de direcao/esterco), entao "
+        "essas linhas sao excluidas da avaliacao, nao descartadas silenciosamente.\n"
+        "- **Amostra pequena**: n=55 janelas no total, ate 6 na menor categoria -- "
+        "leia todo resultado acima como verificacao de viabilidade, nao como validacao "
+        "estatisticamente dimensionada.\n"
+        "- **Confundimento categoria/sessao**: ver nota acima -- nem toda sessao "
+        "(GroupID) contem toda categoria de evento.\n"
+        "- **Proxy de pico, nao amostra bruta**: como a fonte so fornece estatisticas "
         "por janela (nao o sinal bruto por amostra), o pico dinamico usado aqui e "
         "aproximado pelo desvio Max/Min em relacao a Media da janela, nao pela deteccao "
         "de pico instantaneo que o firmware faz sobre o sinal continuo."
     )
 
 
-def render_view_validacao_hardware(conduta, metricas):
+def render_view_validacao_hardware(conduta, metricas, confound):
     if conduta is None or metricas is None:
         st.error(
             "Nenhum resultado de validacao de hardware encontrado em data/processed/. "
@@ -622,13 +610,14 @@ def render_view_validacao_hardware(conduta, metricas):
     render_metodologia_hardware()
 
     with st.container(border=True):
-        render_harmonizacao_unidades(conduta)
-
-    with st.container(border=True):
-        render_confusao_por_fonte(metricas)
+        render_confusao(metricas)
 
     with st.container(border=True):
         render_recall_por_categoria(metricas)
+
+    if confound is not None and not confound.empty:
+        with st.container(border=True):
+            render_confundimento_sessao(confound)
 
     render_limitacoes_hardware()
 
@@ -721,8 +710,9 @@ def render_view_exportar():
         "Estatisticas descritivas por cluster": "perfis_estatisticas_descritivas.csv",
         "Testes de significancia por variavel": "perfis_testes_significancia.csv",
         "Curva de validacao de k (cotovelo/silhouette)": "validacao_k.csv",
-        "Conduta harmonizada por janela (Yuksel 2021 + Ferreira Jr. 2017)": "driver_conduct_harmonized.csv",
-        "Metricas de discriminacao por fonte e categoria": "driver_conduct_metrics.csv",
+        "Conduta harmonizada por janela (Ferreira Jr. et al., 2017)": "driver_conduct_harmonized.csv",
+        "Metricas de discriminacao (pooled + por categoria)": "driver_conduct_metrics.csv",
+        "Confundimento categoria x sessao (GroupID)": "driver_conduct_confound.csv",
     }
     for titulo, nome_arquivo in arquivos.items():
         caminho = DADOS_DIR / nome_arquivo
@@ -771,6 +761,7 @@ def main():
     validacao_k = carregar_validacao_k()
     conduta = carregar_conduta_harmonizada()
     metricas = carregar_conduta_metricas()
+    confound = carregar_conduta_confound()
 
     projecao, variancia_pct = projetar_pca(normalizada)
     projecao = projecao.merge(
@@ -789,7 +780,7 @@ def main():
             projecao, variancia_pct, kpis_cluster, gerais, significancia, normalizada, validacao_k
         )
     with aba_hardware:
-        render_view_validacao_hardware(conduta, metricas)
+        render_view_validacao_hardware(conduta, metricas, confound)
     with aba_coligacao:
         render_view_coligacao(original, mapa_perfil, conduta)
 
