@@ -546,10 +546,12 @@ def render_kpis_conduta(conduta: pd.DataFrame):
     total_janelas = int(conduta["n_janelas"].sum())
     total_detectados = int(conduta["n_detectados"].sum())
     taxa_geral = total_detectados / total_janelas if total_janelas else float("nan")
-    colunas = st.columns(3)
+    n_motoristas = conduta.loc[conduta["motorista"] != "desconhecido", "motorista"].nunique()
+    colunas = st.columns(4)
     itens = [
         ("Janelas analisadas", str(total_janelas)),
         ("Fontes de dados", str(conduta["fonte"].nunique())),
+        ("Motoristas identificados", str(n_motoristas)),
         ("Taxa de deteccao geral", f"{taxa_geral:.0%}"),
     ]
     for coluna, (rotulo, valor) in zip(colunas, itens):
@@ -557,16 +559,22 @@ def render_kpis_conduta(conduta: pd.DataFrame):
 
 
 def render_bar_taxa_deteccao_conduta(conduta: pd.DataFrame):
-    dados = conduta.copy()
-    dados["comportamento"] = dados["rotulo_evento"].map(
+    """Taxa de deteccao por rotulo de evento, agregada entre motoristas
+    (a mesma janela do arquivo tem uma linha por motorista dentro de cada
+    fonte -- ver render_tabela_conduta para a granularidade por motorista)."""
+    agregado = conduta.groupby(["fonte", "rotulo_evento"], as_index=False).agg(
+        n_janelas=("n_janelas", "sum"), n_detectados=("n_detectados", "sum"),
+    )
+    agregado["taxa_deteccao"] = agregado["n_detectados"] / agregado["n_janelas"]
+    agregado["comportamento"] = agregado["rotulo_evento"].map(
         lambda r: "normal" if r == "Non-aggressive event" else "agressiva"
     )
-    dados["comportamento_label"] = dados["comportamento"].map(COMPORTAMENTO_LABEL)
-    presentes = [c for c in ("agressiva", "normal") if c in dados["comportamento"].unique()]
+    agregado["comportamento_label"] = agregado["comportamento"].map(COMPORTAMENTO_LABEL)
+    presentes = [c for c in ("agressiva", "normal") if c in agregado["comportamento"].unique()]
     ordem = [COMPORTAMENTO_LABEL[c] for c in presentes]
     cores = [CORES_COMPORTAMENTO[c] for c in presentes]
 
-    grafico = alt.Chart(dados).mark_bar(cornerRadiusTopLeft=6, cornerRadiusTopRight=6).encode(
+    grafico = alt.Chart(agregado).mark_bar(cornerRadiusTopLeft=6, cornerRadiusTopRight=6).encode(
         x=alt.X("rotulo_evento:N", title=None, sort="-y", axis=alt.Axis(labelAngle=-30)),
         y=alt.Y("taxa_deteccao:Q", title="Taxa de deteccao", axis=alt.Axis(format="%")),
         color=alt.Color(
@@ -578,17 +586,33 @@ def render_bar_taxa_deteccao_conduta(conduta: pd.DataFrame):
     st.altair_chart(grafico, width="stretch")
 
 
+def render_bar_taxa_deteccao_motorista(conduta: pd.DataFrame):
+    dados = conduta[conduta["motorista"] != "desconhecido"].groupby(
+        ["fonte", "motorista"], as_index=False
+    ).agg(n_janelas=("n_janelas", "sum"), n_detectados=("n_detectados", "sum"))
+    dados["taxa_deteccao"] = dados["n_detectados"] / dados["n_janelas"]
+
+    grafico = alt.Chart(dados).mark_bar(
+        cornerRadiusTopLeft=6, cornerRadiusTopRight=6, color=CORES_COMPORTAMENTO["agressiva"],
+    ).encode(
+        x=alt.X("motorista:N", title=None, axis=alt.Axis(labelAngle=0)),
+        y=alt.Y("taxa_deteccao:Q", title="Taxa de deteccao", axis=alt.Axis(format="%")),
+        tooltip=["fonte", "motorista", alt.Tooltip("taxa_deteccao:Q", format=".0%"), "n_janelas"],
+    ).properties(height=280)
+    st.altair_chart(grafico, width="stretch")
+
+
 def render_tabela_conduta(conduta: pd.DataFrame):
     tabela = conduta.copy()
     tabela["taxa_deteccao"] = tabela["taxa_deteccao"].map(lambda v: f"{v:.0%}")
     tabela["magnitude_media_ms2"] = tabela["magnitude_media_ms2"].map(lambda v: f"{v:.2f}")
     tabela["magnitude_maxima_ms2"] = tabela["magnitude_maxima_ms2"].map(lambda v: f"{v:.2f}")
     tabela = tabela[[
-        "fonte", "rotulo_evento", "n_janelas", "n_detectados",
+        "fonte", "motorista", "rotulo_evento", "n_janelas", "n_detectados",
         "taxa_deteccao", "magnitude_media_ms2", "magnitude_maxima_ms2",
     ]]
     tabela.columns = [
-        "Fonte", "Rotulo do evento", "Janelas", "Detectados",
+        "Fonte", "Motorista", "Rotulo do evento", "Janelas", "Detectados",
         "Taxa de deteccao", "Magnitude media (m/s^2)", "Magnitude maxima (m/s^2)",
     ]
     st.dataframe(tabela, width="stretch", hide_index=True)
@@ -649,11 +673,26 @@ def render_view_telemetria(telemetria, conduta=None):
         return
 
     render_kpis_conduta(conduta)
+
+    tem_motorista = (conduta["motorista"] != "desconhecido").any()
+    if tem_motorista:
+        col_evento, col_motorista = st.columns(2)
+    else:
+        col_evento = st.container()
+
+    with col_evento:
+        with st.container(border=True):
+            st.markdown("##### Taxa de deteccao por rotulo de evento")
+            render_bar_taxa_deteccao_conduta(conduta)
+    if tem_motorista:
+        with col_motorista:
+            with st.container(border=True):
+                st.markdown("##### Taxa de deteccao por motorista")
+                st.caption("Somente Jair Jr. (2016) identifica o motorista por trajeto")
+                render_bar_taxa_deteccao_motorista(conduta)
+
     with st.container(border=True):
-        st.markdown("##### Taxa de deteccao por rotulo de evento")
-        render_bar_taxa_deteccao_conduta(conduta)
-    with st.container(border=True):
-        st.markdown("##### Resumo por rotulo de evento")
+        st.markdown("##### Resumo por motorista e rotulo de evento")
         render_tabela_conduta(conduta)
 
 

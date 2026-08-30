@@ -254,7 +254,7 @@ def processar_conduta_combinada(df_bruto: pd.DataFrame, limiar_ms2: float = LIMI
 
 
 def resumir_conduta_combinada(df_janelas: pd.DataFrame) -> pd.DataFrame:
-    resumo = df_janelas.groupby(["fonte", "rotulo_evento"]).agg(
+    resumo = df_janelas.groupby(["fonte", "motorista", "rotulo_evento"]).agg(
         n_janelas=("evento_detectado", "size"),
         n_detectados=("evento_detectado", "sum"),
         magnitude_media_ms2=("magnitude_pico_ms2", "mean"),
