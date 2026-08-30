@@ -56,6 +56,7 @@ FONTE_CITACAO = FONTE_LABEL["jair_jr_driverBehaviorDataset_2016"]
 
 CATEGORIA_LABEL = {
     "ACCELERATION": "Aceleracao", "BRAKING": "Frenagem", "TURN": "Curva",
+    "NON_AGGRESSIVE": "Nao agressivo", "LANE_CHANGE": "Mudanca de faixa",
 }
 
 
@@ -599,6 +600,29 @@ def render_limitacoes_hardware():
     )
 
 
+def render_tabela_motoristas(conduta: pd.DataFrame):
+    st.markdown("##### Dataset dos motoristas")
+    st.caption(
+        f"Janelas de evento por sessao de gravacao (motorista), ja harmonizadas "
+        f"(unidades e rotulos) por src/validacao_hardware.py. Fonte: {FONTE_CITACAO}."
+    )
+    tabela = conduta.copy()
+    tabela["CategoriaLabel"] = tabela["EventCategory"].map(CATEGORIA_LABEL).fillna(tabela["EventCategory"])
+    tabela["AcimaLimiar"] = tabela["HarshPredicted_6mps2"].map({1: "sim", 0: "nao"})
+    tabela = tabela[[
+        "GroupID", "EventLabel", "CategoriaLabel", "WindowIndex",
+        "PeakDynamicAccel_mps2", "AcimaLimiar",
+    ]]
+    tabela.columns = [
+        "Motorista", "Rotulo original", "Categoria", "Janela",
+        "Aceleracao de pico (m/s^2)", "Acima do limiar (~6 m/s^2)",
+    ]
+    st.dataframe(
+        tabela, width="stretch", hide_index=True,
+        column_config={"Aceleracao de pico (m/s^2)": st.column_config.NumberColumn(format="%.2f")},
+    )
+
+
 def render_view_validacao_hardware(conduta, metricas, confound):
     if conduta is None or metricas is None:
         st.error(
@@ -609,8 +633,11 @@ def render_view_validacao_hardware(conduta, metricas, confound):
 
     render_metodologia_hardware()
 
+    # Matriz de confusao (render_confusao) desativada por pedido -- por
+    # enquanto mostra so a tabela bruta dos motoristas abaixo. Funcao mantida
+    # para reativacao futura.
     with st.container(border=True):
-        render_confusao(metricas)
+        render_tabela_motoristas(conduta)
 
     with st.container(border=True):
         render_recall_por_categoria(metricas)
@@ -626,6 +653,36 @@ def render_view_validacao_hardware(conduta, metricas, confound):
 # Aba 3 -- Coligacao Conceitual (Part A.7 / C) -- passeio ilustrativo, sem
 # juncao real entre dados sinteticos de apolice e dados publicos de conducao.
 # ---------------------------------------------------------------------------
+
+def render_exemplo_perfil(perfil_numero: int, apolice: pd.Series, evento: pd.Series, narrativa: str):
+    st.markdown(f"**{NOME_PERFIL[perfil_numero]}**")
+    col_apolice, col_evento = st.columns(2)
+    with col_apolice:
+        with st.container(border=True):
+            st.markdown("**Apolice (dado sintetico)**")
+            st.caption("Cadastro/cotacao -- lado da segmentacao (Parte A)")
+            st.markdown(
+                f"- Numero: `{apolice['numeroApolice']}`\n"
+                f"- Frota total: {apolice['total_veiculos']:.0f} veiculos "
+                f"({apolice['pct_autonomos']:.0%} autonomos/terceiros)\n"
+                f"- Classe de risco: {apolice['classe_risco']:.0f}/5\n"
+                f"- Coberturas ativas: {apolice['qt_coberturas_ativas']:.0f}\n"
+                f"- Referral pendente: {'sim' if apolice['referral_pendente'] else 'nao'}\n"
+                f"- Custo historico declarado: {_fmt_brl(apolice['valor_pago_historico'])}"
+            )
+    with col_evento:
+        with st.container(border=True):
+            st.markdown(f"**Evento de conducao (dataset publico) · {FONTE_CITACAO}**")
+            st.caption("Janela rotulada -- lado da validacao de hardware (Parte B)")
+            st.markdown(
+                f"- Categoria harmonizada: {CATEGORIA_LABEL.get(evento['EventCategory'], evento['EventCategory'])}\n"
+                f"- Rotulo original: {evento['EventLabel']}\n"
+                f"- Magnitude dinamica de pico: {evento['PeakDynamicAccel_mps2']:.2f} m/s^2\n"
+                f"- Acima do limiar (~6 m/s^2): {'sim' if evento['HarshPredicted_6mps2'] else 'nao'}"
+            )
+    st.caption(narrativa)
+    st.divider()
+
 
 def render_view_coligacao(original: pd.DataFrame, mapa_perfil: dict, conduta: pd.DataFrame):
     st.markdown(
@@ -688,63 +745,66 @@ def render_view_coligacao(original: pd.DataFrame, mapa_perfil: dict, conduta: pd
     st.divider()
 
     if conduta is None or conduta.empty:
-        st.info("Execute src/validacao_hardware.py para habilitar o exemplo ilustrativo.")
+        st.info("Execute src/validacao_hardware.py para habilitar os exemplos ilustrativos.")
         return
 
     original = original.copy()
     original["perfil_numero"] = original["cluster"].map(mapa_perfil)
-    candidatos_perfil1 = original[original["perfil_numero"] == 1]
-    if candidatos_perfil1.empty:
-        st.info("Nenhuma apolice do Perfil 1 encontrada na base atual.")
-        return
-    apolice = candidatos_perfil1.sort_values(
-        ["valor_pago_historico", "classe_risco"], ascending=False
-    ).iloc[0]
 
-    eventos_alvo = conduta[
-        (conduta["ValidationRole"] == "harsh")
-        & (conduta["EventCategory"].isin(["TURN", "BRAKING"]))
-        & (conduta["HarshPredicted_6mps2"] == 1)
-    ]
-    if eventos_alvo.empty:
-        eventos_alvo = conduta[conduta["ValidationRole"] == "harsh"]
-    evento = eventos_alvo.sort_values("PeakDynamicAccel_mps2", ascending=False).iloc[0]
-
-    st.markdown("##### Exemplo ilustrativo")
-    col_apolice, col_evento = st.columns(2)
-    with col_apolice:
-        with st.container(border=True):
-            st.markdown(f"**Apolice (dado sintetico) · {NOME_PERFIL[1]}**")
-            st.caption("Cadastro/cotacao -- lado da segmentacao (Parte A)")
-            st.markdown(
-                f"- Numero: `{apolice['numeroApolice']}`\n"
-                f"- Frota total: {apolice['total_veiculos']:.0f} veiculos "
-                f"({apolice['pct_autonomos']:.0%} autonomos/terceiros)\n"
-                f"- Classe de risco: {apolice['classe_risco']:.0f}/5\n"
-                f"- Motorista licenciado: {'sim' if apolice['motorista_licenciado'] else 'nao'}\n"
-                f"- Custo historico declarado: {_fmt_brl(apolice['valor_pago_historico'])}"
-            )
-    with col_evento:
-        with st.container(border=True):
-            fonte_label = FONTE_LABEL.get(evento["SourceDataset"], evento["SourceDataset"])
-            st.markdown(f"**Evento de conducao (dataset publico) · {fonte_label}**")
-            st.caption("Janela rotulada -- lado da validacao de hardware (Parte B)")
-            st.markdown(
-                f"- Categoria harmonizada: {CATEGORIA_LABEL.get(evento['EventCategory'], evento['EventCategory'])}\n"
-                f"- Rotulo original: {evento['EventLabel']}\n"
-                f"- Magnitude dinamica de pico: {evento['PeakDynamicAccel_mps2']:.2f} m/s^2\n"
-                f"- Acima do limiar (~6 m/s^2): {'sim' if evento['HarshPredicted_6mps2'] else 'nao'}"
-            )
-
+    st.markdown("##### Exemplos ilustrativos por perfil")
     st.caption(
-        "Narrativa ilustrativa: se o dispositivo ESP32 desta frota (Perfil 1, ja "
-        "sinalizada como alto risco pela segmentacao historica) registrasse um evento "
-        "de conducao com esta magnitude, esse sumario reforcaria/confirmaria a "
-        "classificacao existente -- e o inverso, uma frota com poucos eventos "
-        "assim, poderia reduzi-la ao longo do tempo (Secao 3.4.1). Nenhum coeficiente "
-        "de correlacao ou KPI estatistico e calculado aqui, pois nenhuma relacao real "
-        "entre os dois conjuntos de dados existe nesta PoC."
+        "Um exemplo por perfil, escolhido para tornar a narrativa concreta -- nao "
+        "uma amostra representativa nem um resultado estatistico (ver aviso acima: "
+        "nenhuma relacao real entre os dois conjuntos de dados existe nesta PoC)."
     )
+
+    cand1 = original[original["perfil_numero"] == 1]
+    if not cand1.empty:
+        apolice1 = cand1.sort_values(["valor_pago_historico", "classe_risco"], ascending=False).iloc[0]
+        eventos1 = conduta[
+            (conduta["ValidationRole"] == "harsh")
+            & (conduta["EventCategory"].isin(["TURN", "BRAKING"]))
+            & (conduta["HarshPredicted_6mps2"] == 1)
+        ]
+        if eventos1.empty:
+            eventos1 = conduta[conduta["ValidationRole"] == "harsh"]
+        evento1 = eventos1.sort_values("PeakDynamicAccel_mps2", ascending=False).iloc[0]
+        render_exemplo_perfil(
+            1, apolice1, evento1,
+            "Narrativa ilustrativa: se o dispositivo ESP32 desta frota (ja "
+            "sinalizada como alto risco pela segmentacao historica) registrasse "
+            "um evento de conducao com esta magnitude, esse sumario "
+            "reforcaria/confirmaria a classificacao existente (Secao 3.4.1)."
+        )
+
+    cand2 = original[original["perfil_numero"] == 2]
+    if not cand2.empty:
+        apolice2 = cand2.sort_values(["qt_coberturas_ativas", "lmi_por_veiculo"], ascending=False).iloc[0]
+        eventos2 = conduta[conduta["ValidationRole"] == "baseline"]
+        if eventos2.empty:
+            eventos2 = conduta
+        evento2 = eventos2.sort_values("PeakDynamicAccel_mps2", ascending=True).iloc[0]
+        render_exemplo_perfil(
+            2, apolice2, evento2,
+            "Narrativa ilustrativa: um evento sem sinal de conducao agressiva "
+            "reforcaria a leitura de baixo risco ja indicada pela alta cobertura "
+            "e baixo custo historico desta apolice -- consistente com a manutencao "
+            "de condicoes comerciais favoraveis."
+        )
+
+    cand3 = original[original["perfil_numero"] == 3]
+    if not cand3.empty:
+        apolice3 = cand3.sort_values(["tempo_cotacao_emissao", "referral_pendente"], ascending=False).iloc[0]
+        mediana_magnitude = conduta["PeakDynamicAccel_mps2"].median()
+        evento3 = conduta.loc[(conduta["PeakDynamicAccel_mps2"] - mediana_magnitude).abs().idxmin()]
+        render_exemplo_perfil(
+            3, apolice3, evento3,
+            "Narrativa ilustrativa: cotacoes em referral ou conversao tardia ainda "
+            "nao tem um padrao comportamental estabelecido -- um primeiro evento "
+            "real, agressivo ou nao, teria peso desproporcional em reduzir essa "
+            "incerteza, ao contrario dos Perfis 1 e 2, onde a evidencia historica ja "
+            "aponta uma direcao."
+        )
 
 
 def render_view_exportar():
