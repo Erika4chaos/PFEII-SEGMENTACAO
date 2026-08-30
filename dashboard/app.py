@@ -131,13 +131,15 @@ def carregar_conduta_confound():
 
 
 @st.cache_data
-def carregar_velocidade_simulada():
-    """Perfil de velocidade SIMULADO (duracao e velocidade inicial por
-    regras de negocio, velocidade final derivada por cinematica simples a
-    partir da aceleracao real de pico) para os eventos de aceleracao/
-    frenagem, gerado por src/simular_velocidade_conduta.py -- nao e dado
-    medido. Ver docstring daquele script."""
-    caminho = DADOS_DIR / "conduta_velocidade_simulada.csv"
+def carregar_delta_v():
+    """Variacao de velocidade (delta-v) por evento de aceleracao/frenagem,
+    CALCULADA por integracao da aceleracao real (numero de amostras da
+    janela recuperado do proprio dado, baseline de sessao a partir de
+    janelas reais NON_AGGRESSIVE) por src/calcular_delta_v_conduta.py --
+    a unica constante nao medida neste arquivo e a taxa de amostragem
+    citada (ver docstring daquele script). Nao ha variavel simulada por
+    regra de negocio."""
+    caminho = DADOS_DIR / "conduta_delta_v.csv"
     return pd.read_csv(caminho) if caminho.exists() else None
 
 
@@ -610,70 +612,57 @@ def render_limitacoes_hardware():
     )
 
 
-def render_velocidade_simulada(velocidade: pd.DataFrame):
-    st.markdown("##### Simulacao ilustrativa: perfil de velocidade por evento")
+def render_delta_v(delta_v: pd.DataFrame):
+    st.markdown("##### Variacao de velocidade (delta-v) por evento")
     st.caption(
-        "**Dado simulado, nao medido.** A aceleracao de pico de cada evento e real "
-        "(mesma coluna usada na deteccao acima); duracao e velocidade inicial sao "
-        "simuladas por regras de negocio (faixas plausiveis de transito urbano), "
-        "pois a base usada para os eventos de aceleracao/frenagem nao inclui canal "
-        "de velocidade. A velocidade final e derivada por cinematica simples "
-        "(delta-v = aceleracao x tempo) a partir da aceleracao real e da duracao "
-        "simulada."
+        "Calculado por integracao da propria aceleracao do evento -- nao simulado. "
+        "O numero de amostras da janela e a media da aceleracao dinamica (com a "
+        "gravidade/offset de montagem removidos via janelas reais de linha de base "
+        "da mesma sessao) vem do dado medido; a duracao usa uma taxa de amostragem "
+        "citada da literatura (nao medida neste arquivo), com a sensibilidade a essa "
+        "taxa reportada ao rodar `src/calcular_delta_v_conduta.py`. Isto e uma "
+        "variacao de velocidade, nao uma velocidade absoluta -- a fonte nao tem "
+        "canal de velocidade/GPS para fornecer um ponto de partida."
     )
 
-    dados = velocidade.copy()
+    dados = delta_v.copy()
     dados["CategoriaLabel"] = dados["EventCategory"].map(CATEGORIA_LABEL)
     dados["EventoId"] = (
         dados["CategoriaLabel"] + " #" + (dados.groupby("EventCategory").cumcount() + 1).astype(str)
     )
     ordem_eventos = dados.sort_values(["EventCategory", "EventoId"])["EventoId"].tolist()
 
-    linha = alt.Chart(dados).mark_rule(strokeWidth=3, opacity=0.5).encode(
+    grafico = alt.Chart(dados).mark_bar(cornerRadiusEnd=4).encode(
         y=alt.Y("EventoId:N", sort=ordem_eventos, title=None),
-        x=alt.X("velocidade_inicial_simulada_kmh:Q", title="Velocidade simulada (km/h)"),
-        x2="velocidade_final_simulada_kmh:Q",
+        x=alt.X("delta_v_kmh:Q", title="Delta-v (km/h)"),
         color=alt.Color(
             "CategoriaLabel:N", title="Categoria",
             scale=alt.Scale(domain=["Aceleracao", "Frenagem"], range=[CORES_PERFIL[3], CORES_PERFIL[1]]),
         ),
-    )
-    ponto_inicial = alt.Chart(dados).mark_point(filled=True, size=70, color="#8a7f97").encode(
-        y=alt.Y("EventoId:N", sort=ordem_eventos),
-        x="velocidade_inicial_simulada_kmh:Q",
-        tooltip=["EventoId", alt.Tooltip("velocidade_inicial_simulada_kmh:Q", format=".1f", title="Inicial (km/h)")],
-    )
-    ponto_final = alt.Chart(dados).mark_point(filled=True, size=90, shape="diamond").encode(
-        y=alt.Y("EventoId:N", sort=ordem_eventos),
-        x="velocidade_final_simulada_kmh:Q",
-        color=alt.Color("CategoriaLabel:N", legend=None,
-                         scale=alt.Scale(domain=["Aceleracao", "Frenagem"], range=[CORES_PERFIL[3], CORES_PERFIL[1]])),
-        tooltip=["EventoId", "PeakDynamicAccel_mps2",
-                 alt.Tooltip("velocidade_final_simulada_kmh:Q", format=".1f", title="Final (km/h)")],
-    )
-    st.altair_chart((linha + ponto_inicial + ponto_final).properties(height=320), width="stretch")
-    st.caption("Ponto cinza = velocidade inicial simulada · Losango = velocidade final simulada.")
+        tooltip=["EventoId", "n_amostras", alt.Tooltip("duracao_evento_s:Q", format=".2f", title="Duracao (s)"),
+                 alt.Tooltip("delta_v_kmh:Q", format=".1f")],
+    ).properties(height=320)
+    st.altair_chart(grafico, width="stretch")
 
     tabela = dados[[
-        "EventoId", "PeakDynamicAccel_mps2", "duracao_evento_simulada_s",
-        "velocidade_inicial_simulada_kmh", "velocidade_final_simulada_kmh",
+        "EventoId", "n_amostras", "duracao_evento_s",
+        "aceleracao_dinamica_media_mps2", "delta_v_kmh",
     ]].copy()
     tabela.columns = [
-        "Evento", "Aceleracao de pico (m/s^2, real)", "Duracao (s, simulada)",
-        "Velocidade inicial (km/h, simulada)", "Velocidade final (km/h, simulada)",
+        "Evento", "Amostras (real)", "Duracao (s)",
+        "Aceleracao dinamica media (m/s^2, real)", "Delta-v (km/h, calculado)",
     ]
     st.dataframe(
         tabela, width="stretch", hide_index=True,
         column_config={
-            "Aceleracao de pico (m/s^2, real)": st.column_config.NumberColumn(format="%.2f"),
-            "Duracao (s, simulada)": st.column_config.NumberColumn(format="%.2f"),
-            "Velocidade inicial (km/h, simulada)": st.column_config.NumberColumn(format="%.1f"),
-            "Velocidade final (km/h, simulada)": st.column_config.NumberColumn(format="%.1f"),
+            "Duracao (s)": st.column_config.NumberColumn(format="%.2f"),
+            "Aceleracao dinamica media (m/s^2, real)": st.column_config.NumberColumn(format="%.2f"),
+            "Delta-v (km/h, calculado)": st.column_config.NumberColumn(format="%.1f"),
         },
     )
 
 
-def render_view_validacao_hardware(conduta, metricas, confound, velocidade):
+def render_view_validacao_hardware(conduta, metricas, confound, delta_v):
     if conduta is None or metricas is None:
         st.error(
             "Nenhum resultado de validacao de hardware encontrado em data/processed/. "
@@ -695,10 +684,10 @@ def render_view_validacao_hardware(conduta, metricas, confound, velocidade):
 
     render_limitacoes_hardware()
 
-    if velocidade is not None and not velocidade.empty:
+    if delta_v is not None and not delta_v.empty:
         st.divider()
         with st.container(border=True):
-            render_velocidade_simulada(velocidade)
+            render_delta_v(delta_v)
 
 
 # ---------------------------------------------------------------------------
@@ -792,7 +781,7 @@ def render_view_exportar():
         "Conduta harmonizada por janela (Ferreira Jr. et al., 2017)": "driver_conduct_harmonized.csv",
         "Metricas de discriminacao (pooled + por categoria)": "driver_conduct_metrics.csv",
         "Confundimento categoria x sessao (GroupID)": "driver_conduct_confound.csv",
-        "Velocidade simulada por evento (dado sintetico/ilustrativo)": "conduta_velocidade_simulada.csv",
+        "Delta-v calculado por evento de aceleracao/frenagem": "conduta_delta_v.csv",
     }
     for titulo, nome_arquivo in arquivos.items():
         caminho = DADOS_DIR / nome_arquivo
@@ -842,7 +831,7 @@ def main():
     conduta = carregar_conduta_harmonizada()
     metricas = carregar_conduta_metricas()
     confound = carregar_conduta_confound()
-    velocidade = carregar_velocidade_simulada()
+    delta_v = carregar_delta_v()
 
     projecao, variancia_pct = projetar_pca(normalizada)
     projecao = projecao.merge(
@@ -861,7 +850,7 @@ def main():
             projecao, variancia_pct, kpis_cluster, gerais, significancia, normalizada, validacao_k
         )
     with aba_hardware:
-        render_view_validacao_hardware(conduta, metricas, confound, velocidade)
+        render_view_validacao_hardware(conduta, metricas, confound, delta_v)
     with aba_coligacao:
         render_view_coligacao(original, mapa_perfil, conduta)
 
