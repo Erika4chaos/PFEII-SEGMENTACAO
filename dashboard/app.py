@@ -1,10 +1,11 @@
 """
-Etapa 4 (Secao 3.5.4): dashboard Streamlit com tres abas -- Segmentacao
-(projecao PCA 2D dos clusters, tabela de perfis, KPIs e indices de validacao
-tecnica), Validacao de Hardware (discriminacao do limiar de ~6 m/s^2 do
-firmware contra o dataset publico de conducao de Ferreira Jr. et al., 2017)
-e Coligacao Conceitual (passeio ilustrativo perfil x evento de hardware,
-sem juncao real de dados).
+Etapa 4 (Secao 3.5.4): dashboard Streamlit com tres secoes, navegadas por
+botoes na barra lateral -- Segmentacao (projecao PCA 2D dos clusters,
+tabela de perfis, KPIs e indices de validacao tecnica), Validacao de
+Hardware (discriminacao do limiar de ~6 m/s^2 do firmware contra o dataset
+publico de conducao de Ferreira Jr. et al., 2017) e Coligacao Conceitual
+(passeio ilustrativo perfil x evento de hardware, sem juncao real de
+dados).
 
 Uso:
     streamlit run dashboard/app.py
@@ -219,6 +220,17 @@ def aplicar_estilo():
             color: #ffffff;
             border: none;
         }
+        [data-testid="stSidebar"] button[kind="secondary"] {
+            background-color: transparent;
+            border-color: transparent;
+            color: #cfc4dc;
+            text-align: left;
+            justify-content: flex-start;
+        }
+        [data-testid="stSidebar"] button[kind="secondary"]:hover {
+            background-color: #5a4a75;
+            color: #ffffff;
+        }
         .side-badge {
             background: #5a4a75;
             border-radius: 10px;
@@ -266,13 +278,28 @@ def aplicar_estilo():
     )
 
 
-def render_sidebar():
+NAV_OPCOES = ["Segmentacao", "Validacao de Hardware", "Coligacao Conceitual"]
+
+
+def render_sidebar() -> str:
     with st.sidebar:
         st.markdown(
             '<h2 style="margin-top:0;">Dashboard de <span style="color:#e87ba4;">Risco</span></h2>'
             '<div style="font-size:12px;margin-bottom:14px;">RCT Transportador</div>',
             unsafe_allow_html=True,
         )
+
+        if "view" not in st.session_state:
+            st.session_state["view"] = NAV_OPCOES[0]
+
+        for opcao in NAV_OPCOES:
+            ativo = st.session_state["view"] == opcao
+            if st.button(
+                opcao, key=f"nav_{opcao.replace(' ', '_')}",
+                width="stretch", type=("primary" if ativo else "secondary"),
+            ):
+                st.session_state["view"] = opcao
+
         st.markdown(
             '<div class="side-badge"><b>Etapa 4 da metodologia.</b> '
             'Segmentacao via K-Means (k=3) sobre 19 variaveis derivadas (Quadro 2), '
@@ -282,6 +309,8 @@ def render_sidebar():
             '</div>',
             unsafe_allow_html=True,
         )
+
+    return st.session_state["view"]
 
 
 def render_linha_kpis(dados: dict):
@@ -820,7 +849,7 @@ def render_view_exportar():
 def main():
     st.set_page_config(page_title="Segmentacao RCT", layout="wide")
     aplicar_estilo()
-    render_sidebar()
+    view = render_sidebar()
 
     col_titulo, col_badge = st.columns([4, 1])
     with col_titulo:
@@ -861,16 +890,13 @@ def main():
     projecao["perfil_numero"] = projecao["cluster"].map(mapa_perfil)
     projecao["nome_perfil"] = projecao["perfil_numero"].map(NOME_PERFIL)
 
-    aba_segmentacao, aba_hardware, aba_coligacao = st.tabs(
-        ["Segmentacao", "Validacao de Hardware", "Coligacao Conceitual"]
-    )
-    with aba_segmentacao:
+    if view == "Segmentacao":
         render_view_segmentacao(
             projecao, variancia_pct, kpis_cluster, gerais, significancia, normalizada, validacao_k
         )
-    with aba_hardware:
+    elif view == "Validacao de Hardware":
         render_view_validacao_hardware(conduta, metricas)
-    with aba_coligacao:
+    elif view == "Coligacao Conceitual":
         render_view_coligacao(original, mapa_perfil, conduta)
 
     with st.expander("Exportar dados"):
