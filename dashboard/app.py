@@ -188,29 +188,44 @@ def aplicar_estilo():
     st.markdown(
         """
         <style>
+        :root {
+            --navy: #44355b; --navy2: #5a4a75; --navy3: #2e2440;
+            --accent: #c97b9e; --accent-soft: #f6e6ee;
+            --bg: #f6f4f9; --card: #ffffff;
+            --text: #44355b; --muted: #65596f; --line: #e3dcea;
+        }
+        [data-testid="stAppViewContainer"], [data-testid="stMain"] {
+            background-color: var(--bg);
+        }
         h1 {
-            color: #c2185b;
-            border-bottom: 3px solid #e87ba4;
-            padding-bottom: 0.3rem;
+            color: var(--text);
+            border-bottom: 1px solid var(--line);
+            padding-bottom: 0.4rem;
+            font-weight: 700;
         }
         h2 {
-            color: #ad1457;
-            border-bottom: 2px solid #f5c2d8;
-            padding-bottom: 0.2rem;
+            color: var(--text);
             margin-top: 1.2rem;
+            font-weight: 700;
         }
-        h3 { color: #ad1457; }
+        h3 { color: var(--text); }
         [data-testid="stMetric"] {
-            background-color: #fff0f5;
-            border: 1px solid #f5c2d8;
+            background-color: var(--card);
+            border: 1px solid var(--line);
             border-radius: 12px;
-            padding: 12px 14px 8px 14px;
+            padding: 14px 16px 10px 16px;
         }
-        [data-testid="stMetricLabel"] { color: #a8375f; }
-        [data-testid="stMetricValue"] { color: #c2185b; font-size: 1.5rem; }
+        [data-testid="stMetricLabel"] {
+            color: var(--muted);
+            font-size: 11.5px;
+            font-weight: 600;
+            letter-spacing: 0.02em;
+            text-transform: uppercase;
+        }
+        [data-testid="stMetricValue"] { color: var(--text); font-size: 1.5rem; }
 
         [data-testid="stSidebar"] {
-            background-color: #2e2440;
+            background-color: var(--navy3);
         }
         [data-testid="stSidebar"] label, [data-testid="stSidebar"] p,
         [data-testid="stSidebar"] span, [data-testid="stSidebar"] div {
@@ -228,11 +243,11 @@ def aplicar_estilo():
             justify-content: flex-start;
         }
         [data-testid="stSidebar"] button[kind="secondary"]:hover {
-            background-color: #5a4a75;
+            background-color: var(--navy2);
             color: #ffffff;
         }
         .side-badge {
-            background: #5a4a75;
+            background: var(--navy2);
             border-radius: 10px;
             padding: 12px;
             font-size: 12px;
@@ -240,29 +255,31 @@ def aplicar_estilo():
             color: #cfc4dc;
             margin-top: 12px;
         }
-        .side-badge b { color: #e87ba4; }
+        .side-badge b { color: var(--accent); }
 
         [data-testid="stVerticalBlockBorderWrapper"] {
-            border-color: #f5c2d8 !important;
+            border-color: var(--line) !important;
+            border-radius: 12px !important;
         }
 
         .pill-badge {
             display: inline-block;
-            background: #f6e6ee;
+            background: var(--accent-soft);
             color: #9d5577;
             font-size: 12px;
             font-weight: 600;
             padding: 5px 12px;
             border-radius: 999px;
         }
-        .insight-item { padding: 8px 0; border-bottom: 1px solid #f5c2d8; font-size: 13px; }
+        .insight-item { padding: 9px 0; border-bottom: 1px solid var(--line); font-size: 13px; }
         .insight-item:last-child { border-bottom: none; }
         .insight-dot {
             display: inline-block; width: 8px; height: 8px; border-radius: 50%;
-            background: #e87ba4; margin-right: 8px;
+            background: var(--accent); margin-right: 8px; margin-top: 5px;
+            flex-shrink: 0;
         }
-        .insight-title { font-weight: 700; color: #44355b; }
-        .insight-caption { color: #65596f; font-size: 12px; }
+        .insight-title { font-weight: 700; color: var(--text); font-size: 12.5px; }
+        .insight-caption { color: var(--muted); font-size: 11.5px; line-height: 1.45; }
 
         .tag-pill {
             display: inline-block; padding: 3px 10px; border-radius: 999px;
@@ -272,6 +289,27 @@ def aplicar_estilo():
             background: #fff3cd; border: 1px solid #e8b83c; border-radius: 10px;
             padding: 14px 16px; color: #7a5a00; font-size: 13px; line-height: 1.6;
         }
+
+        /* Cartoes de KPI customizados (render_linha_kpis) */
+        .kpi-card {
+            background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+            padding: 14px 16px;
+        }
+        .kpi-card .lbl {
+            font-size: 11.5px; color: var(--muted); font-weight: 600;
+            letter-spacing: 0.02em; text-transform: uppercase;
+        }
+        .kpi-card .val { font-size: 24px; font-weight: 700; margin-top: 5px; color: var(--text); }
+        .kpi-card .val small { font-size: 12px; color: var(--muted); font-weight: 500; }
+
+        /* Tabela de perfis customizada (render_tabela_perfis) */
+        .tabela-perfis { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+        .tabela-perfis th {
+            text-align: left; color: var(--muted); font-size: 11px; text-transform: uppercase;
+            letter-spacing: 0.03em; padding: 8px 10px; border-bottom: 1.5px solid var(--line);
+        }
+        .tabela-perfis td { padding: 10px; border-bottom: 1px solid var(--line); color: var(--text); }
+        .tabela-perfis tr:last-child td { border-bottom: none; }
         </style>
         """,
         unsafe_allow_html=True,
@@ -314,17 +352,23 @@ def render_sidebar() -> str:
 
 
 def render_linha_kpis(dados: dict):
-    colunas = st.columns(6)
     itens = [
-        ("Apolices", str(int(dados["n_apolices"]))),
-        ("Premio medio / veic.", _fmt_brl_compacto(dados["premio_por_veiculo_medio"])),
-        ("LMI medio / veic.", _fmt_brl_compacto(dados["lmi_por_veiculo_medio"])),
-        ("Custo hist. medio", _fmt_brl_compacto(dados["valor_pago_historico_medio"])),
-        ("Motorista licenciado", f"{dados['pct_motorista_licenciado']:.0%}"),
-        ("Taxa de referral", f"{dados['taxa_referral']:.0%}"),
+        ("Apolices", str(int(dados["n_apolices"])), ""),
+        ("Premio medio / veic.", _fmt_brl_compacto(dados["premio_por_veiculo_medio"]), "por veiculo/ano"),
+        ("LMI medio / veic.", _fmt_brl_compacto(dados["lmi_por_veiculo_medio"]), "por veiculo"),
+        ("Custo hist. medio", _fmt_brl_compacto(dados["valor_pago_historico_medio"]), "por sinistro declarado"),
+        ("Motorista licenciado", f"{dados['pct_motorista_licenciado']:.0%}", ""),
+        ("Taxa de referral", f"{dados['taxa_referral']:.0%}", "aprovacao especial"),
     ]
-    for coluna, (rotulo, valor) in zip(colunas, itens):
-        coluna.metric(rotulo, valor)
+    colunas = st.columns(len(itens))
+    for coluna, (rotulo, valor, secundario) in zip(colunas, itens):
+        with coluna:
+            st.markdown(
+                f'<div class="kpi-card"><div class="lbl">{rotulo}</div>'
+                f'<div class="val">{valor}'
+                f'{f" <small>{secundario}</small>" if secundario else ""}</div></div>',
+                unsafe_allow_html=True,
+            )
 
 
 def render_scatter(projecao: pd.DataFrame, perfil_selecionado_numero):
@@ -386,15 +430,26 @@ def render_bar_custo(kpis_cluster: pd.DataFrame):
 
 
 def render_tabela_perfis(kpis_cluster: pd.DataFrame):
-    tabela = kpis_cluster[[
-        "nome_perfil", "n_apolices", "premio_por_veiculo_medio",
-        "valor_pago_historico_medio", "taxa_referral",
-    ]].copy()
-    tabela["premio_por_veiculo_medio"] = tabela["premio_por_veiculo_medio"].map(_fmt_brl)
-    tabela["valor_pago_historico_medio"] = tabela["valor_pago_historico_medio"].map(_fmt_brl)
-    tabela["taxa_referral"] = tabela["taxa_referral"].map(lambda v: f"{v:.0%}")
-    tabela.columns = ["Perfil", "Apolices", "Premio/veic.", "Custo hist.", "Referral"]
-    st.dataframe(tabela, width="stretch", hide_index=True)
+    linhas_html = []
+    for _, linha in kpis_cluster.sort_values("perfil_numero").iterrows():
+        cor = CORES_PERFIL[int(linha["perfil_numero"])]
+        linhas_html.append(
+            "<tr>"
+            f'<td><span class="tag-pill" style="background:{cor};">'
+            f'Perfil {int(linha["perfil_numero"])}</span></td>'
+            f'<td>{int(linha["n_apolices"])}</td>'
+            f'<td>{_fmt_brl(linha["premio_por_veiculo_medio"])}</td>'
+            f'<td>{_fmt_brl(linha["valor_pago_historico_medio"])}</td>'
+            f'<td>{linha["taxa_referral"]:.0%}</td>'
+            "</tr>"
+        )
+    st.markdown(
+        '<table class="tabela-perfis"><thead><tr>'
+        "<th>Perfil</th><th>Apolices</th><th>Premio/veic.</th>"
+        "<th>Custo hist.</th><th>Referral</th>"
+        "</tr></thead><tbody>" + "".join(linhas_html) + "</tbody></table>",
+        unsafe_allow_html=True,
+    )
 
 
 def render_view_visao_geral(projecao, kpis_cluster, gerais, significancia, perfil_sel_nome):
