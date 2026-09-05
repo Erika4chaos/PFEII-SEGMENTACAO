@@ -2,9 +2,9 @@
 Etapa 4 (Secao 3.5.4): dashboard Streamlit com tres secoes, navegadas por
 botoes na barra lateral -- Segmentacao (projecao PCA 2D dos clusters,
 tabela de perfis, KPIs e indices de validacao tecnica), Validacao de
-Hardware (discriminacao do limiar de ~6 m/s^2 do firmware contra o dataset
-publico de conducao de Ferreira Jr. et al., 2017) e Coligacao Conceitual
-(passeio ilustrativo perfil x evento de hardware, sem juncao real de
+Hardware (discriminacao do limiar de ~6 m/s^2 do firmware, aplicado ao
+UAH-DriveSet, ROMERA; BERGASA; ARROYO, 2016) e Coligacao Conceitual
+(passeio ilustrativo perfil x trajeto de hardware, sem juncao real de
 dados).
 
 Uso:
@@ -17,6 +17,7 @@ from pathlib import Path
 import altair as alt
 import pandas as pd
 import streamlit as st
+from scipy.stats import f_oneway
 from sklearn.decomposition import PCA
 from sklearn.metrics import calinski_harabasz_score, davies_bouldin_score, silhouette_score
 
@@ -45,19 +46,26 @@ NOME_PERFIL = {
 CORES_PERFIL = {1: "#e87ba4", 2: "#2a78d6", 3: "#008300"}
 COR_LINHA_DESTAQUE = "#c2185b"
 
-# Citacao academica da fonte publica unica de validacao de hardware (Part
-# B.5 do escopo tecnico) -- o valor bruto de SourceDataset em
-# driver_conduct_harmonized.csv e um identificador de arquivo, nao a
-# citacao a exibir na UI. Um segundo dataset (Yuksel, 2021) foi avaliado e
-# deliberadamente descartado (unidades divergentes, rotulos com evidencia
-# de serem por sessao de gravacao, nao por janela) -- ver docstring de
-# src/validacao_hardware.py; nao reintroduzir sem repetir essa checagem.
-FONTE_LABEL = {"jair_jr_driverBehaviorDataset_2016": "Ferreira Jr. et al. (2017)"}
-FONTE_CITACAO = FONTE_LABEL["jair_jr_driverBehaviorDataset_2016"]
+# Citacao academica da fonte de validacao de hardware (Part B.5 do escopo
+# tecnico). O UAH-DriveSet e a fonte prevista no plano original; um
+# dataset de conducao ja segmentado em janelas (Ferreira Jr. et al., 2017)
+# foi usado como substituto temporario enquanto o host/espelhos do
+# UAH-DriveSet estiveram indisponiveis -- ver historico em
+# src/validacao_hardware.py. Nao reintroduzir a substituicao sem que o
+# UAH-DriveSet volte a ficar inacessivel.
+FONTE_CITACAO = "UAH-DriveSet (Romera; Bergasa; Arroyo, 2016)"
 
-CATEGORIA_LABEL = {
-    "ACCELERATION": "Aceleracao", "BRAKING": "Frenagem", "TURN": "Curva",
-    "NON_AGGRESSIVE": "Nao agressivo", "LANE_CHANGE": "Mudanca de faixa",
+COMPORTAMENTO_LABEL = {
+    "normal": "Normal", "agressiva": "Agressiva", "sonolenta": "Sonolenta",
+    "desconhecido": "Desconhecido",
+}
+# Cores por rotulo comportamental do trajeto (reaproveita a paleta de perfis
+# de negocio: agressiva ~ Perfil 1 de alto risco, normal ~ Perfil 2 de baixo
+# risco); sonolenta e desconhecido usam tons neutros pois nao correspondem
+# a nenhum perfil de negocio da segmentacao.
+COMPORTAMENTO_COR = {
+    "agressiva": CORES_PERFIL[1], "normal": CORES_PERFIL[2],
+    "sonolenta": "#8a6d3b", "desconhecido": "#9a90a3",
 }
 
 
@@ -97,29 +105,34 @@ def carregar_significancia():
 
 
 @st.cache_data
-def carregar_conduta_harmonizada():
-    """Le a saida ja harmonizada (unidades + rotulos) de
-    src/validacao_hardware.py, ja restrita a fonte unica escolhida
-    (Ferreira Jr. et al., 2017) -- o dashboard nunca reimplementa a
-    verificacao de escala m/s^2 nem o mapeamento de rotulos, apenas
-    consome o CSV que o script produz (ver Part B.5/A.7 do escopo
-    tecnico)."""
-    caminho = DADOS_DIR / "driver_conduct_harmonized.csv"
+def carregar_validacao_uah():
+    """Le o resumo por trajeto ja calculado por src/validacao_hardware.py
+    (deteccao de eventos pelo limiar do firmware + rotulo comportamental
+    extraido do nome da pasta) -- o dashboard nunca reimplementa a
+    deteccao nem a extracao de rotulo, apenas consome o CSV que o script
+    produz (ver Part B.5/A.7 do escopo tecnico)."""
+    caminho = DADOS_DIR / "validacao_hardware_uah_driveset.csv"
     if not caminho.exists():
         return None
     df = pd.read_csv(caminho)
-    df["FonteLabel"] = df["SourceDataset"].map(FONTE_LABEL).fillna(df["SourceDataset"])
+    df["ComportamentoLabel"] = df["comportamento"].map(COMPORTAMENTO_LABEL).fillna(df["comportamento"])
+    df["tipo_via"] = df["trajeto"].apply(
+        lambda t: "Rodovia" if "MOTORWAY" in t.upper() else ("Via secundaria" if "SECONDARY" in t.upper() else "desconhecido")
+    )
     return df
 
 
-@st.cache_data
-def carregar_conduta_metricas():
-    """Matriz de confusao / precisao / recall / F1 (pooled + por categoria
-    harmonizada), ja calculada por src/validacao_hardware.py -- reaproveitada
-    aqui, nunca recalculada, para nao duplicar a logica de avaliacao entre
-    script e dashboard."""
-    caminho = DADOS_DIR / "driver_conduct_metrics.csv"
-    return pd.read_csv(caminho) if caminho.exists() else None
+def calcular_anova_uah(validacao: pd.DataFrame, coluna: str):
+    """ANOVA one-way (coluna ~ comportamento), mesma logica de
+    src/validacao_hardware.py::validar_discriminacao -- recalculada aqui
+    apenas para exibicao (poucas linhas, custo desprezivel), nunca para
+    decidir o resultado (o CSV consumido ja e o produzido pelo script)."""
+    conhecidos = validacao[validacao["comportamento"] != "desconhecido"]
+    grupos = [g[coluna].dropna().to_numpy() for _, g in conhecidos.groupby("comportamento")]
+    grupos = [g for g in grupos if len(g) > 0]
+    if len(grupos) < 2:
+        return None
+    return f_oneway(*grupos)
 
 
 def projetar_pca(normalizada: pd.DataFrame) -> tuple[pd.DataFrame, float]:
@@ -562,161 +575,144 @@ def render_view_segmentacao(projecao, variancia_pct, kpis_cluster, gerais, signi
 # Aba 2 -- Validacao de Hardware (Part B.5 / A.7)
 # ---------------------------------------------------------------------------
 
-def render_metodologia_hardware():
+def render_metodologia_hardware(validacao: pd.DataFrame):
+    n_trajetos = len(validacao)
+    n_motoristas = validacao["motorista"].nunique()
     st.info(
-        "**Substituicao de fonte de dados (documentada, nao um desvio silencioso).** "
-        "O plano original validava o firmware contra o UAH-DriveSet (ROMERA; BERGASA; "
-        "ARROYO, 2016), cujo host oficial e espelhos conhecidos ficaram indisponiveis "
-        f"durante a execucao do PFE II. A fonte de substituicao -- {FONTE_CITACAO} -- "
-        "fornece janelas estatisticas ja pre-extraidas por evento (media, maximo, "
-        "minimo, variancia, assimetria, curtose, desvio padrao por eixo), nao um fluxo "
-        "continuo bruto com rotulo de trajeto. Por isso a validacao aqui e de "
-        "**discriminacao do tipo de evento a partir de estatisticas de janela**, e nao "
-        "de deteccao em fluxo continuo -- o que, na verdade, aproxima-se mais do que o "
-        "proprio firmware produz (eventos resumidos, nunca o fluxo bruto)."
+        f"O limiar de magnitude de aceleracao do firmware (~6 m/s^2, Secao 2.8) e "
+        f"aplicado diretamente ao sinal bruto do acelerometro (10 Hz) de cada um dos "
+        f"{n_trajetos} trajetos gravados por {n_motoristas} motoristas do "
+        f"**{FONTE_CITACAO}**. A taxa de eventos detectados por minuto e comparada, "
+        "por ANOVA, entre os tres rotulos comportamentais conhecidos do dataset "
+        "(normal / agressiva / sonolenta), codificados pelos proprios autores no "
+        "nome de cada trajeto -- nao inferidos por este projeto."
     )
     st.caption(
-        "Uma segunda fonte (Yuksel, 2021) foi avaliada e descartada deliberadamente: "
-        "suas unidades divergiam do documentado (exigindo harmonizacao empirica "
-        "fragil) e seus rotulos mostravam estatisticas de pico quase constantes ao "
-        "longo de dezenas de janelas consecutivas, sinal de rotulagem por sessao de "
-        "gravacao e nao por janela -- uma evidencia mais fraca que a rotulagem de "
-        f"{FONTE_CITACAO}, feita por pesquisadores contra video de referencia. "
-        "Ver docstring de `src/validacao_hardware.py`."
+        "O algoritmo de deteccao de eventos ja pre-extraido pelo dataset "
+        "(`EVENTS_INERTIAL.txt`) nao e usado aqui de proposito: o objetivo desta aba "
+        "e validar a logica do FIRMWARE, nao reaproveitar a deteccao de outro "
+        "algoritmo. Ver docstring de `src/validacao_hardware.py`."
     )
 
 
-def render_confusao(metricas: pd.DataFrame):
-    st.markdown("##### Matriz de confusao e metricas de discriminacao")
-    linha = metricas[metricas["categoria"] == "todas"].iloc[0]
+def render_anova_uah(validacao: pd.DataFrame):
+    st.markdown("##### Discriminacao por comportamento (ANOVA one-way)")
     st.caption(
-        f"n = {int(linha['n'])} janelas avaliadas -- verificacao de viabilidade em "
-        "amostra pequena, na mesma postura ja adotada pelos testes de bancada e rodagem "
-        "no veiculo do autor (Secao 3.3), nao uma validacao estatisticamente "
-        "dimensionada."
+        "F e p referem-se a diferenca de medias entre normal / agressiva / sonolenta. "
+        "p < 0,05 indica que o rotulo comportamental explica parte da variacao "
+        "observada na metrica."
     )
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("n", int(linha["n"]))
-    col2.metric("Precisao", f"{linha['precision']:.1%}")
-    col3.metric("Recall", f"{linha['recall']:.1%}")
-    col4.metric("F1", f"{linha['f1']:.3f}")
-    st.markdown(
-        f"VP={int(linha['tp'])} · FN={int(linha['fn'])} · "
-        f"VN={int(linha['tn'])} · FP={int(linha['fp'])}"
-    )
+    resultado_eventos = calcular_anova_uah(validacao, "eventos_por_min")
+    resultado_velocidade = calcular_anova_uah(validacao, "velocidade_media_kmh")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        if resultado_eventos is not None:
+            st.metric(
+                "Eventos/min ~ comportamento",
+                f"F={resultado_eventos.statistic:.2f}",
+                f"p={resultado_eventos.pvalue:.3f}",
+                delta_color="off",
+            )
+        else:
+            st.metric("Eventos/min ~ comportamento", "n/d")
+    with col2:
+        if resultado_velocidade is not None:
+            st.metric(
+                "Velocidade media ~ comportamento",
+                f"F={resultado_velocidade.statistic:.2f}",
+                f"p={resultado_velocidade.pvalue:.3f}",
+                delta_color="off",
+            )
+        else:
+            st.metric("Velocidade media ~ comportamento", "n/d")
+
+    if resultado_eventos is not None and resultado_eventos.pvalue >= 0.05:
+        st.warning(
+            "**A taxa de eventos por minuto nao discrimina significativamente entre "
+            "os rotulos comportamentais nesta amostra (p >= 0,05).** O limiar de ~6 "
+            "m/s^2, aplicado ao sinal real e continuo do acelerometro, e raramente "
+            "ultrapassado mesmo em trajetos rotulados como agressivos -- eventos de "
+            "conducao agressiva costumam ser picos breves (fracao de segundo), nao um "
+            "patamar sustentado, o que limita o poder de deteccao de um limiar unico "
+            "de magnitude sobre poucos minutos de trajeto. A velocidade media, por "
+            "outro lado, discrimina significativamente: trajetos agressivos deste "
+            "dataset sao, em media, mais rapidos -- um sinal correlacionado, mas nao "
+            "equivalente ao que o firmware mede."
+        )
 
 
-def render_recall_por_categoria(metricas: pd.DataFrame):
-    st.markdown("##### Recall por categoria harmonizada de evento")
-    st.caption(
-        "ACCELERATION / BRAKING / TURN sao as categorias que o firmware efetivamente "
-        "classifica. O n de cada categoria e mostrado junto ao recall -- ate 6 janelas "
-        "em algumas classes -- para que a leitura nao pareca mais robusta do que e."
-    )
-    dados = metricas[metricas["categoria"] != "todas"].copy()
-    dados["CategoriaLabel"] = dados["categoria"].map(CATEGORIA_LABEL)
-    dados["RotuloEixo"] = dados["CategoriaLabel"] + " (n=" + dados["n"].astype(int).astype(str) + ")"
+def render_grafico_eventos_comportamento(validacao: pd.DataFrame):
+    st.markdown("##### Eventos por minuto, por rotulo comportamental")
+    dados = validacao[validacao["comportamento"] != "desconhecido"].copy()
+    dados["ComportamentoLabel"] = dados["comportamento"].map(COMPORTAMENTO_LABEL)
+    ordem = ["Normal", "Agressiva", "Sonolenta"]
+    cores = [COMPORTAMENTO_COR["normal"], COMPORTAMENTO_COR["agressiva"], COMPORTAMENTO_COR["sonolenta"]]
 
-    grafico = alt.Chart(dados).mark_bar(
-        cornerRadiusTopLeft=6, cornerRadiusTopRight=6, color=CORES_PERFIL[1],
-    ).encode(
-        x=alt.X("RotuloEixo:N", title=None, axis=alt.Axis(labelAngle=0)),
-        y=alt.Y("recall:Q", title="Recall", axis=alt.Axis(format="%")),
-        tooltip=["CategoriaLabel", "n", alt.Tooltip("recall:Q", format=".1%")],
+    grafico = alt.Chart(dados).mark_point(size=90, filled=True, opacity=0.75).encode(
+        x=alt.X("ComportamentoLabel:N", title=None, sort=ordem, axis=alt.Axis(labelAngle=0)),
+        y=alt.Y("eventos_por_min:Q", title="Eventos por minuto (limiar ~6 m/s^2)"),
+        color=alt.Color(
+            "ComportamentoLabel:N", title="Comportamento",
+            scale=alt.Scale(domain=ordem, range=cores),
+        ),
+        tooltip=["motorista", "trajeto", "ComportamentoLabel",
+                 alt.Tooltip("eventos_por_min:Q", format=".3f"),
+                 alt.Tooltip("magnitude_maxima_ms2:Q", format=".2f")],
     ).properties(height=280)
     st.altair_chart(grafico, width="stretch")
 
 
-def render_resumo_motoristas(conduta: pd.DataFrame):
-    st.markdown("##### Resumo por motorista")
-    resumo = conduta.groupby("GroupID").agg(
-        n_eventos=("WindowIndex", "count"),
-        n_categorias=("EventCategory", "nunique"),
-        taxa_acima_limiar=("HarshPredicted_6mps2", "mean"),
-    ).reset_index().sort_values("GroupID")
-
-    cores = [CORES_PERFIL[1], CORES_PERFIL[2], CORES_PERFIL[3]]
-    colunas = st.columns(len(resumo))
-    for coluna, (_, linha), cor in zip(colunas, resumo.iterrows(), cores):
-        with coluna:
-            with st.container(border=True):
-                st.markdown(
-                    f'<span class="tag-pill" style="background:{cor};">{linha["GroupID"]}</span>',
-                    unsafe_allow_html=True,
-                )
-                st.metric("Eventos", int(linha["n_eventos"]))
-                st.metric("Categorias distintas", int(linha["n_categorias"]))
-                st.metric("Acima do limiar (~6 m/s^2)", f"{linha['taxa_acima_limiar']:.0%}")
-
-
-def render_grafico_motoristas(conduta: pd.DataFrame):
-    dados = conduta.copy()
-    dados["CategoriaLabel"] = dados["EventCategory"].map(CATEGORIA_LABEL).fillna(dados["EventCategory"])
-    agregado = dados.groupby(["GroupID", "CategoriaLabel"]).size().reset_index(name="n_eventos")
-
-    grafico = alt.Chart(agregado).mark_bar(cornerRadiusTopLeft=4, cornerRadiusTopRight=4).encode(
-        x=alt.X("GroupID:N", title=None, axis=alt.Axis(labelAngle=0)),
-        y=alt.Y("n_eventos:Q", title="Numero de eventos"),
-        color=alt.Color("CategoriaLabel:N", title="Categoria"),
-        xOffset="CategoriaLabel:N",
-        tooltip=["GroupID", "CategoriaLabel", "n_eventos"],
-    ).properties(height=300)
-    st.altair_chart(grafico, width="stretch")
-
-
-def render_tabela_motoristas(conduta: pd.DataFrame):
-    st.markdown("##### Dataset dos motoristas")
+def render_tabela_trajetos(validacao: pd.DataFrame):
+    st.markdown("##### Trajetos do UAH-DriveSet")
     st.caption(
-        f"Janelas de evento por sessao de gravacao (motorista), ja harmonizadas "
-        f"(unidades e rotulos) por src/validacao_hardware.py. Fonte: {FONTE_CITACAO}."
+        f"Um trajeto por linha, ja resumido por src/validacao_hardware.py. Fonte: "
+        f"{FONTE_CITACAO}."
     )
-    tabela = conduta.copy()
-    tabela["CategoriaLabel"] = tabela["EventCategory"].map(CATEGORIA_LABEL).fillna(tabela["EventCategory"])
-    tabela["AcimaLimiar"] = tabela["HarshPredicted_6mps2"].map({1: "sim", 0: "nao"})
+    tabela = validacao.copy()
     tabela = tabela[[
-        "GroupID", "EventLabel", "CategoriaLabel", "WindowIndex",
-        "PeakDynamicAccel_mps2", "AcimaLimiar",
+        "motorista", "ComportamentoLabel", "tipo_via", "duracao_min", "n_eventos",
+        "eventos_por_min", "magnitude_maxima_ms2", "velocidade_media_kmh",
     ]]
     tabela.columns = [
-        "Motorista", "Rotulo original", "Categoria", "Janela",
-        "Aceleracao de pico (m/s^2)", "Acima do limiar (~6 m/s^2)",
+        "Motorista", "Comportamento", "Tipo de via", "Duracao (min)", "N. eventos",
+        "Eventos/min", "Aceleracao de pico (m/s^2)", "Velocidade media (km/h)",
     ]
     st.dataframe(
         tabela, width="stretch", hide_index=True,
-        column_config={"Aceleracao de pico (m/s^2)": st.column_config.NumberColumn(format="%.2f")},
+        column_config={
+            "Duracao (min)": st.column_config.NumberColumn(format="%.1f"),
+            "Eventos/min": st.column_config.NumberColumn(format="%.3f"),
+            "Aceleracao de pico (m/s^2)": st.column_config.NumberColumn(format="%.2f"),
+            "Velocidade media (km/h)": st.column_config.NumberColumn(format="%.1f"),
+        },
     )
     st.caption(
-        "**Legenda:** `Motorista` -- identificador anonimo da sessao de gravacao no "
-        "dataset publico (nao e uma pessoa identificada). `Categoria` -- tipo de "
-        "manobra harmonizado pelo firmware (Aceleracao, Frenagem, Curva, Nao "
-        "agressivo, Mudanca de faixa). `Janela` -- indice da janela de tempo rotulada "
-        "dentro daquela sessao. `Aceleracao de pico` -- magnitude dinamica maxima "
-        "medida naquela janela, em m/s^2, com a gravidade ja removida. `Acima do "
-        "limiar` -- se essa magnitude ultrapassa o limiar de deteccao do firmware "
-        "(~6 m/s^2)."
+        "**Legenda:** `Motorista` -- identificador D1-D6 usado pelo UAH-DriveSet "
+        "(nao e uma pessoa identificada). `Comportamento` -- rotulo atribuido pelos "
+        "autores do dataset ao gravar o trajeto, nao inferido por este projeto. "
+        "`Tipo de via` -- rodovia ou via secundaria, extraido do nome do trajeto; "
+        "trajetos de rodovia tendem a velocidade media mais alta, um fator "
+        "parcialmente confundido com o rotulo comportamental (ver aviso acima)."
     )
 
 
-def render_view_validacao_hardware(conduta, metricas):
-    if conduta is None or metricas is None:
+def render_view_validacao_hardware(validacao):
+    if validacao is None or validacao.empty:
         st.error(
             "Nenhum resultado de validacao de hardware encontrado em data/processed/. "
             "Execute `python src/validacao_hardware.py` antes de abrir esta aba."
         )
         return
 
-    render_metodologia_hardware()
-
-    # Matriz de confusao (render_confusao) desativada por pedido -- por
-    # enquanto mostra so o resumo/grafico/tabela dos motoristas abaixo.
-    # Funcao mantida para reativacao futura.
-    with st.container(border=True):
-        render_resumo_motoristas(conduta)
-        render_grafico_motoristas(conduta)
-        render_tabela_motoristas(conduta)
+    render_metodologia_hardware(validacao)
 
     with st.container(border=True):
-        render_recall_por_categoria(metricas)
+        render_anova_uah(validacao)
+        render_grafico_eventos_comportamento(validacao)
+
+    with st.container(border=True):
+        render_tabela_trajetos(validacao)
 
 
 # ---------------------------------------------------------------------------
@@ -742,23 +738,24 @@ def render_exemplo_perfil(perfil_numero: int, apolice: pd.Series, evento: pd.Ser
             )
     with col_evento:
         with st.container(border=True):
-            st.markdown(f"**Evento de conducao (dataset publico) · {FONTE_CITACAO}**")
-            st.caption("Janela rotulada -- lado da validacao de hardware (Parte B)")
+            st.markdown(f"**Trajeto de conducao (dataset publico) · {FONTE_CITACAO}**")
+            st.caption("Trajeto real -- lado da validacao de hardware (Parte B)")
             st.markdown(
-                f"- Categoria harmonizada: {CATEGORIA_LABEL.get(evento['EventCategory'], evento['EventCategory'])}\n"
-                f"- Rotulo original: {evento['EventLabel']}\n"
-                f"- Magnitude dinamica de pico: {evento['PeakDynamicAccel_mps2']:.2f} m/s^2\n"
-                f"- Acima do limiar (~6 m/s^2): {'sim' if evento['HarshPredicted_6mps2'] else 'nao'}"
+                f"- Comportamento rotulado: {COMPORTAMENTO_LABEL.get(evento['comportamento'], evento['comportamento'])}\n"
+                f"- Motorista: {evento['motorista']} · Tipo de via: {evento['tipo_via']}\n"
+                f"- Eventos por minuto (limiar ~6 m/s^2): {evento['eventos_por_min']:.3f}\n"
+                f"- Aceleracao de pico no trajeto: {evento['magnitude_maxima_ms2']:.2f} m/s^2\n"
+                f"- Velocidade media: {evento['velocidade_media_kmh']:.0f} km/h"
             )
     st.caption(narrativa)
     st.divider()
 
 
-def render_view_coligacao(original: pd.DataFrame, mapa_perfil: dict, conduta: pd.DataFrame):
+def render_view_coligacao(original: pd.DataFrame, mapa_perfil: dict, validacao: pd.DataFrame):
     st.markdown(
         '<div class="no-join-banner">'
         '<b>Nao ha juncao real entre os dois conjuntos de dados nesta aba.</b> '
-        'A apolice sintetica e o evento de conducao publico abaixo nao compartilham '
+        'A apolice sintetica e o trajeto de conducao publico abaixo nao compartilham '
         'nenhuma chave/entidade real -- nao existe motorista, veiculo ou vinculo '
         'contratual em comum entre uma apolice gerada sinteticamente para esta PoC e '
         'um motorista de um dataset publico de conducao. O par exibido e puramente '
@@ -814,7 +811,7 @@ def render_view_coligacao(original: pd.DataFrame, mapa_perfil: dict, conduta: pd
     )
     st.divider()
 
-    if conduta is None or conduta.empty:
+    if validacao is None or validacao.empty:
         st.info("Execute src/validacao_hardware.py para habilitar os exemplos ilustrativos.")
         return
 
@@ -831,32 +828,30 @@ def render_view_coligacao(original: pd.DataFrame, mapa_perfil: dict, conduta: pd
     cand1 = original[original["perfil_numero"] == 1]
     if not cand1.empty:
         apolice1 = cand1.sort_values(["valor_pago_historico", "classe_risco"], ascending=False).iloc[0]
-        eventos1 = conduta[
-            (conduta["ValidationRole"] == "harsh")
-            & (conduta["EventCategory"].isin(["TURN", "BRAKING"]))
-            & (conduta["HarshPredicted_6mps2"] == 1)
-        ]
-        if eventos1.empty:
-            eventos1 = conduta[conduta["ValidationRole"] == "harsh"]
-        evento1 = eventos1.sort_values("PeakDynamicAccel_mps2", ascending=False).iloc[0]
+        trajetos1 = validacao[validacao["comportamento"] == "agressiva"]
+        if trajetos1.empty:
+            trajetos1 = validacao
+        trajeto1 = trajetos1.sort_values(
+            ["eventos_por_min", "magnitude_maxima_ms2"], ascending=False
+        ).iloc[0]
         render_exemplo_perfil(
-            1, apolice1, evento1,
+            1, apolice1, trajeto1,
             "Narrativa ilustrativa: se o dispositivo ESP32 desta frota (ja "
             "sinalizada como alto risco pela segmentacao historica) registrasse "
-            "um evento de conducao com esta magnitude, esse sumario "
+            "um trajeto com esta taxa de eventos, esse sumario "
             "reforcaria/confirmaria a classificacao existente (Secao 3.4.1)."
         )
 
     cand2 = original[original["perfil_numero"] == 2]
     if not cand2.empty:
         apolice2 = cand2.sort_values(["qt_coberturas_ativas", "lmi_por_veiculo"], ascending=False).iloc[0]
-        eventos2 = conduta[conduta["ValidationRole"] == "baseline"]
-        if eventos2.empty:
-            eventos2 = conduta
-        evento2 = eventos2.sort_values("PeakDynamicAccel_mps2", ascending=True).iloc[0]
+        trajetos2 = validacao[validacao["comportamento"] == "normal"]
+        if trajetos2.empty:
+            trajetos2 = validacao
+        trajeto2 = trajetos2.sort_values("magnitude_maxima_ms2", ascending=True).iloc[0]
         render_exemplo_perfil(
-            2, apolice2, evento2,
-            "Narrativa ilustrativa: um evento sem sinal de conducao agressiva "
+            2, apolice2, trajeto2,
+            "Narrativa ilustrativa: um trajeto sem sinal de conducao agressiva "
             "reforcaria a leitura de baixo risco ja indicada pela alta cobertura "
             "e baixo custo historico desta apolice -- consistente com a manutencao "
             "de condicoes comerciais favoraveis."
@@ -865,12 +860,12 @@ def render_view_coligacao(original: pd.DataFrame, mapa_perfil: dict, conduta: pd
     cand3 = original[original["perfil_numero"] == 3]
     if not cand3.empty:
         apolice3 = cand3.sort_values(["tempo_cotacao_emissao", "referral_pendente"], ascending=False).iloc[0]
-        mediana_magnitude = conduta["PeakDynamicAccel_mps2"].median()
-        evento3 = conduta.loc[(conduta["PeakDynamicAccel_mps2"] - mediana_magnitude).abs().idxmin()]
+        mediana_magnitude = validacao["magnitude_maxima_ms2"].median()
+        trajeto3 = validacao.loc[(validacao["magnitude_maxima_ms2"] - mediana_magnitude).abs().idxmin()]
         render_exemplo_perfil(
-            3, apolice3, evento3,
+            3, apolice3, trajeto3,
             "Narrativa ilustrativa: cotacoes em referral ou conversao tardia ainda "
-            "nao tem um padrao comportamental estabelecido -- um primeiro evento "
+            "nao tem um padrao comportamental estabelecido -- um primeiro trajeto "
             "real, agressivo ou nao, teria peso desproporcional em reduzir essa "
             "incerteza, ao contrario dos Perfis 1 e 2, onde a evidencia historica ja "
             "aponta uma direcao."
@@ -884,9 +879,7 @@ def render_view_exportar():
         "Estatisticas descritivas por cluster": "perfis_estatisticas_descritivas.csv",
         "Testes de significancia por variavel": "perfis_testes_significancia.csv",
         "Curva de validacao de k (cotovelo/silhouette)": "validacao_k.csv",
-        "Conduta harmonizada por janela (Ferreira Jr. et al., 2017)": "driver_conduct_harmonized.csv",
-        "Metricas de discriminacao (pooled + por categoria)": "driver_conduct_metrics.csv",
-        "Confundimento categoria x sessao (GroupID)": "driver_conduct_confound.csv",
+        "Resumo por trajeto (UAH-DriveSet)": "validacao_hardware_uah_driveset.csv",
     }
     for titulo, nome_arquivo in arquivos.items():
         caminho = DADOS_DIR / nome_arquivo
@@ -933,8 +926,7 @@ def main():
     gerais = calcular_kpis_gerais(original)
     significancia = carregar_significancia()
     validacao_k = carregar_validacao_k()
-    conduta = carregar_conduta_harmonizada()
-    metricas = carregar_conduta_metricas()
+    validacao_uah = carregar_validacao_uah()
 
     projecao, variancia_pct = projetar_pca(normalizada)
     projecao = projecao.merge(
@@ -950,9 +942,9 @@ def main():
             projecao, variancia_pct, kpis_cluster, gerais, significancia, normalizada, validacao_k
         )
     elif view == "Validacao de Hardware":
-        render_view_validacao_hardware(conduta, metricas)
+        render_view_validacao_hardware(validacao_uah)
     elif view == "Coligacao Conceitual":
-        render_view_coligacao(original, mapa_perfil, conduta)
+        render_view_coligacao(original, mapa_perfil, validacao_uah)
 
     with st.expander("Exportar dados"):
         render_view_exportar()
