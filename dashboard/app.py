@@ -784,6 +784,18 @@ def render_limitacoes_hardware():
 
 
 def render_view_validacao_hardware(validacao, calibracao, confundimento):
+    st.info(
+        "**Por que usamos o UAH-DriveSet aqui?** O UAH-DriveSet e uma base publica de "
+        "terceiros, usada exclusivamente para validar se a logica de deteccao do "
+        "firmware (limiar de ~6 m/s^2 sobre a magnitude da aceleracao) consegue "
+        "discriminar estilos de conducao conhecidos (normal/agressiva/sonolenta). Ele "
+        "nao contem, e nunca contera, dados de nenhuma transportadora real deste "
+        "projeto. Quando o dispositivo for instalado em campo, os dados de producao "
+        "-- eventos detectados nas apolices reais -- e que alimentam o loop de "
+        "classificacao descrito na Secao 3.4.1 do TCC. Esta aba valida o metodo; nao "
+        "e a fonte dos dados que classificam clientes."
+    )
+
     if validacao is None or validacao.empty:
         st.error(
             "Nenhum resultado de validacao de hardware encontrado em data/processed/. "
@@ -854,7 +866,10 @@ def render_view_coligacao(original: pd.DataFrame, mapa_perfil: dict, validacao: 
         'ilustrativo: narra o TIPO de sinal que, em producao, um dispositivo ESP32 '
         'proprio instalado na frota dessa apolice alimentaria de volta na '
         'classificacao (Secao 2.2.5 / 3.4.1) -- nao um resultado estatistico '
-        'demonstrado.'
+        'demonstrado. O UAH-DriveSet entra nesta narrativa apenas como ilustracao do '
+        'TIPO de sinal (evento de frenagem/curva/aceleracao) que, em producao, um '
+        'dispositivo instalado numa transportadora real geraria -- ele nao e, e nunca '
+        'foi, dado coletado de nenhuma apolice deste projeto.'
         '</div>',
         unsafe_allow_html=True,
     )
