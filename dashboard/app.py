@@ -24,6 +24,9 @@ from sklearn.metrics import calinski_harabasz_score, davies_bouldin_score, silho
 RAIZ = Path(__file__).resolve().parent.parent
 sys.path.append(str(RAIZ / "src"))
 from preprocessamento import COLUNAS_19  # noqa: E402
+from histograma_didatico import (  # noqa: E402
+    frase_de_leitura, histograma_por_perfil, int_ptbr as _int_ptbr, num_ptbr as _num_ptbr,
+)
 
 DADOS_DIR = RAIZ / "data" / "processed"
 
@@ -147,6 +150,31 @@ def carregar_calibracao_uah():
 def carregar_confundimento_uah():
     caminho = DADOS_DIR / "validacao_hardware_uah_confundimento.csv"
     return pd.read_csv(caminho) if caminho.exists() else None
+
+
+@st.cache_data
+def carregar_histograma_uah():
+    """Classes ja binadas (numpy, em src/validacao_hardware.py) da magnitude
+    amostra a amostra, por estilo de conducao e tipo de via. O binning nao e
+    feito aqui nem no motor do grafico: as bordas de classe precisam existir
+    como dado para que as barras possam ser rotuladas e a linha do limiar
+    posicionada no valor exato."""
+    caminho = DADOS_DIR / "validacao_hardware_uah_histograma.csv"
+    if not caminho.exists():
+        return None
+    df = pd.read_csv(caminho)
+    df["Estilo"] = df["comportamento"].map(COMPORTAMENTO_LABEL).fillna(df["comportamento"])
+    return df
+
+
+@st.cache_data
+def carregar_limiares_uah():
+    caminho = DADOS_DIR / "validacao_hardware_uah_limiares.csv"
+    if not caminho.exists():
+        return None
+    df = pd.read_csv(caminho)
+    df["Estilo"] = df["comportamento"].map(COMPORTAMENTO_LABEL).fillna(df["comportamento"])
+    return df
 
 
 def calcular_anova_uah(validacao: pd.DataFrame, coluna: str):
@@ -761,35 +789,46 @@ def _contagem_com_evento(dados: pd.DataFrame, coluna_grupo: str, ordem: list) ->
 
 
 def render_grafico_eventos_comportamento(validacao: pd.DataFrame):
-    st.markdown("##### Aceleracao de pico, por rotulo comportamental")
+    st.markdown("##### Aceleracao de pico de cada trajeto, por rotulo comportamental")
     st.caption(
-        "Esta e a metrica que discrimina significativamente entre os tres grupos "
-        "(ver ANOVA acima). Um histograma por grupo, no mesmo eixo -- quanto mais a "
-        "distribuicao de um grupo esta deslocada para a direita, mais bruscas foram "
-        "as manobras mais fortes registradas naquele grupo."
+        "**Um ponto por trajeto** (nao um histograma): sao apenas 40 trajetos no "
+        "dataset inteiro, e com esse n um histograma agruparia 2 ou 3 trajetos por "
+        "classe e viraria ruido. O dot plot mostra cada trajeto individualmente, que "
+        "e o que esse tamanho de amostra sustenta. Esta e a metrica que discrimina "
+        "significativamente entre os tres grupos (ver ANOVA acima)."
     )
     dados = validacao[validacao["comportamento"] != "desconhecido"].copy()
     dados["ComportamentoLabel"] = dados["comportamento"].map(COMPORTAMENTO_LABEL)
     ordem = ["Normal", "Agressiva", "Sonolenta"]
     cores = [COMPORTAMENTO_COR["normal"], COMPORTAMENTO_COR["agressiva"], COMPORTAMENTO_COR["sonolenta"]]
-    extensao = [0, float(dados["magnitude_maxima_ms2"].max()) + 0.5]
 
-    grafico = alt.Chart(dados).mark_bar().encode(
-        x=alt.X("magnitude_maxima_ms2:Q", bin=alt.Bin(extent=extensao, maxbins=12),
-                 title="Aceleracao de pico do trajeto (m/s^2)"),
-        y=alt.Y("count()", title="Numero de trajetos"),
-        color=alt.Color(
-            "ComportamentoLabel:N", title=None, legend=None,
-            scale=alt.Scale(domain=ordem, range=cores),
-        ),
-        tooltip=["ComportamentoLabel", "count()"],
-    ).properties(width=250, height=240).facet(
-        column=alt.Column(
-            "ComportamentoLabel:N", title=None, sort=ordem,
-            header=alt.Header(labelFontSize=13, labelFontWeight="bold"),
-        ),
+    base = alt.Chart(dados).transform_calculate(jitter="random()")
+    pontos = base.mark_circle(size=110, opacity=0.8).encode(
+        y=alt.Y("ComportamentoLabel:N", title=None, sort=ordem, axis=alt.Axis(labelAngle=0)),
+        yOffset=alt.YOffset("jitter:Q", scale=alt.Scale(domain=[-1.5, 2.5])),
+        x=alt.X("magnitude_maxima_ms2:Q", title="Aceleracao de pico do trajeto (m/s²)",
+                scale=alt.Scale(domain=[0, 7], nice=False)),
+        color=alt.Color("ComportamentoLabel:N", title=None, legend=None,
+                        scale=alt.Scale(domain=ordem, range=cores)),
+        tooltip=["motorista", "trajeto", "ComportamentoLabel", "tipo_via",
+                 alt.Tooltip("magnitude_maxima_ms2:Q", title="Pico (m/s²)", format=".2f"),
+                 alt.Tooltip("n_eventos:Q", title="Eventos detectados")],
     )
-    st.altair_chart(grafico)
+    medianas = alt.Chart(dados).mark_tick(
+        thickness=3, size=34, color=COR_LINHA_DESTAQUE, opacity=0.9,
+    ).encode(
+        y=alt.Y("ComportamentoLabel:N", sort=ordem),
+        x=alt.X("median(magnitude_maxima_ms2):Q"),
+    )
+    limiar = alt.Chart(pd.DataFrame({"v": [6.0]})).mark_rule(
+        strokeDash=[6, 4], strokeWidth=2, color="#44355b",
+    ).encode(x=alt.X("v:Q"))
+
+    st.altair_chart((pontos + medianas + limiar).properties(height=210), width="stretch")
+    st.caption(
+        "Traco vertical escuro = mediana do grupo. Linha tracejada = limiar de 6 m/s² "
+        "do firmware: nenhum trajeto normal ou agressivo alcanca esse valor de pico."
+    )
 
     st.markdown("###### Trajetos que ultrapassaram o limiar do firmware (~6 m/s^2)")
     st.caption(
@@ -807,6 +846,107 @@ def render_grafico_eventos_comportamento(validacao: pd.DataFrame):
                 rotulo, f"{int(linha['com_evento'])} de {int(linha['total'])}",
                 "trajetos com evento", delta_color="off",
             )
+
+
+ORDEM_ESTILO = ["Normal", "Agressiva", "Sonolenta"]
+CORES_ESTILO = {
+    "Normal": COMPORTAMENTO_COR["normal"],
+    "Agressiva": COMPORTAMENTO_COR["agressiva"],
+    "Sonolenta": COMPORTAMENTO_COR["sonolenta"],
+}
+LIMIAR_LITERATURA = 6.0
+
+
+def _frase_limiares(limiares: pd.DataFrame, via: str) -> str:
+    """Leitura automatica da parte que importa da figura: quanto de cada
+    estilo fica acima de cada limiar, e a razao entre agressiva e normal."""
+    sub = limiares if via == "Todas" else limiares[limiares["tipo_via"] == via]
+    agregado = sub.groupby(["limiar_ms2", "Estilo"], as_index=False)[["n_acima", "n_total"]].sum()
+    agregado["pct"] = 100 * agregado["n_acima"] / agregado["n_total"]
+
+    partes = []
+    for limiar in sorted(agregado["limiar_ms2"].unique(), reverse=True):
+        linhas = agregado[agregado["limiar_ms2"] == limiar].set_index("Estilo")
+        trechos = [
+            f"{est.lower()} {_num_ptbr(linhas.loc[est, 'pct'], 3)}%"
+            for est in ORDEM_ESTILO if est in linhas.index
+        ]
+        frase = f"Acima de {_num_ptbr(limiar)} m/s²: " + ", ".join(trechos) + "."
+        if "Agressiva" in linhas.index and "Normal" in linhas.index:
+            pct_agr, pct_norm = linhas.loc["Agressiva", "pct"], linhas.loc["Normal", "pct"]
+            if pct_norm > 0:
+                frase += f" A condução agressiva dispara {pct_agr / pct_norm:.0f}× mais que a normal."
+            elif pct_agr == 0:
+                frase += (" Nem a condução normal nem a agressiva cruzam esse limiar "
+                          "nesta amostra — ou seja, ele não separa os dois estilos.")
+            else:
+                frase += " A condução normal nunca cruza esse limiar nesta amostra."
+        partes.append(frase)
+    return " ".join(partes)
+
+
+def render_histograma_sinal(histograma: pd.DataFrame, limiares: pd.DataFrame,
+                             limiar_recalibrado: float):
+    st.markdown("##### Distribuicao do sinal do acelerometro e onde o limiar corta")
+    st.caption(
+        "Cada amostra do acelerometro (10 Hz, todos os trajetos) entra em uma classe "
+        "de magnitude. E a figura que mostra, diretamente, quanto do sinal real fica "
+        "acima do limiar de deteccao do firmware."
+    )
+
+    via = st.radio(
+        "Tipo de via", ["Todas", "Rodovia", "Via secundaria"], horizontal=True,
+        key="hist_sinal_via",
+        help="Trajetos de rodovia sao mais rapidos que os de via secundaria "
+             "independentemente do estilo de conducao -- separar por via deixa esse "
+             "confundimento visivel.",
+    )
+
+    dados = histograma if via == "Todas" else histograma[histograma["tipo_via"] == via]
+    classes = dados.groupby(
+        ["Estilo", "classe_idx", "classe_min", "classe_max"], as_index=False
+    )["n_amostras"].sum()
+
+    grafico = histograma_por_perfil(
+        classes, coluna_grupo="Estilo", ordem=ORDEM_ESTILO, cores=CORES_ESTILO,
+        rotulo_x="Magnitude da aceleracao (m/s²)", unidade="amostras",
+        limiares={
+            f"{_num_ptbr(limiar_recalibrado)} m/s² (recalibrado)": limiar_recalibrado,
+            f"{_num_ptbr(LIMIAR_LITERATURA)} m/s² (literatura)": LIMIAR_LITERATURA,
+        },
+        escala_log=True, largura=660, altura=135,
+    )
+    st.altair_chart(grafico)
+
+    total = int(classes["n_amostras"].sum())
+    st.info(
+        f"**Leitura:** {frase_de_leitura(classes, unidade='amostras', rotulo_x='magnitude')} "
+        f"{_frase_limiares(limiares, via)}"
+    )
+    st.caption(
+        f"Escala logaritmica no eixo Y (a classe mais baixa concentra a maior parte "
+        f"das {_int_ptbr(total)} amostras; em escala linear as classes da cauda -- "
+        f"justamente onde o limiar corta -- ficariam invisiveis). Classes vazias nao "
+        f"aparecem."
+    )
+
+    with st.expander("O que este grafico mostra"):
+        st.markdown(
+            "- **O que e um histograma:** ele agrupa os valores medidos em faixas "
+            "(classes) de mesma largura e conta quantas medidas caem em cada faixa. "
+            "Aqui cada medida e uma leitura do acelerometro a 10 Hz.\n"
+            "- **Eixo Y:** numero de amostras naquela faixa de magnitude -- nao e "
+            "tempo nem numero de viagens. Esta em escala logaritmica porque a "
+            "primeira classe concentra dezenas de milhares de amostras e as ultimas, "
+            "poucas dezenas.\n"
+            "- **Por que a linha do limiar e o centro da figura:** o firmware so "
+            "registra um evento quando a magnitude ultrapassa o limiar. Tudo que "
+            "esta a esquerda da linha e ignorado pelo dispositivo; so o que esta a "
+            "direita vira evento transmitido.\n"
+            "- **Como comparar os tres paineis:** eles usam as mesmas classes e a "
+            "mesma escala. O que muda entre estilos e ate onde a distribuicao se "
+            "estende para a direita."
+        )
 
 
 def render_binario_uah(validacao: pd.DataFrame):
@@ -844,29 +984,33 @@ def render_binario_uah(validacao: pd.DataFrame):
 
     st.markdown("###### Aceleracao de pico: bom vs. mau comportamento")
     st.caption(
-        "Eventos por minuto fica perto de zero para os dois grupos (ver cartoes "
-        "acima e aviso na secao anterior) -- a diferenca fica mais visivel olhando a "
-        "distribuicao da aceleracao de pico de cada trajeto. Um histograma por "
-        "grupo, no mesmo eixo, para comparacao direta."
+        "Um ponto por trajeto (mesmo motivo do grafico anterior: n=40 nao sustenta "
+        "histograma). Eventos por minuto fica perto de zero nos dois grupos -- a "
+        "diferenca aparece na aceleracao de pico."
     )
     cores = [COMPORTAMENTO_BINARIO_COR[o] for o in ordem]
-    extensao = [0, float(dados["magnitude_maxima_ms2"].max()) + 0.5]
-    grafico = alt.Chart(dados).mark_bar().encode(
-        x=alt.X("magnitude_maxima_ms2:Q", bin=alt.Bin(extent=extensao, maxbins=12),
-                 title="Aceleracao de pico do trajeto (m/s^2)"),
-        y=alt.Y("count()", title="Numero de trajetos"),
-        color=alt.Color(
-            "ComportamentoBinario:N", title=None, legend=None,
-            scale=alt.Scale(domain=ordem, range=cores),
-        ),
-        tooltip=["ComportamentoBinario", "count()"],
-    ).properties(width=340, height=240).facet(
-        column=alt.Column(
-            "ComportamentoBinario:N", title=None, sort=ordem,
-            header=alt.Header(labelFontSize=13, labelFontWeight="bold"),
-        ),
+    base = alt.Chart(dados).transform_calculate(jitter="random()")
+    pontos = base.mark_circle(size=110, opacity=0.8).encode(
+        y=alt.Y("ComportamentoBinario:N", title=None, sort=ordem,
+                axis=alt.Axis(labelAngle=0, labelLimit=200)),
+        yOffset=alt.YOffset("jitter:Q", scale=alt.Scale(domain=[-1.5, 2.5])),
+        x=alt.X("magnitude_maxima_ms2:Q", title="Aceleracao de pico do trajeto (m/s²)",
+                scale=alt.Scale(domain=[0, 7], nice=False)),
+        color=alt.Color("ComportamentoBinario:N", title=None, legend=None,
+                        scale=alt.Scale(domain=ordem, range=cores)),
+        tooltip=["motorista", "trajeto", "ComportamentoBinario", "tipo_via",
+                 alt.Tooltip("magnitude_maxima_ms2:Q", title="Pico (m/s²)", format=".2f")],
     )
-    st.altair_chart(grafico)
+    medianas = alt.Chart(dados).mark_tick(
+        thickness=3, size=40, color=COR_LINHA_DESTAQUE, opacity=0.9,
+    ).encode(
+        y=alt.Y("ComportamentoBinario:N", sort=ordem),
+        x=alt.X("median(magnitude_maxima_ms2):Q"),
+    )
+    limiar = alt.Chart(pd.DataFrame({"v": [6.0]})).mark_rule(
+        strokeDash=[6, 4], strokeWidth=2, color="#44355b",
+    ).encode(x=alt.X("v:Q"))
+    st.altair_chart((pontos + medianas + limiar).properties(height=170), width="stretch")
 
     st.markdown("###### Trajetos que ultrapassaram o limiar do firmware (~6 m/s^2)")
     resumo_evento = _contagem_com_evento(dados, "ComportamentoBinario", ordem)
@@ -954,11 +1098,26 @@ def render_limitacoes_hardware():
             "comportamental) -- tratada como checagem de viabilidade/discriminacao, "
             "nao como validacao estatisticamente dimensionada, na mesma postura "
             "adotada pelos testes de bancada e rodagem no veiculo do autor "
-            "(Secao 3.3)."
+            "(Secao 3.3).\n"
+            "- **O detector e generico**: ele aplica um limiar a magnitude de "
+            "aceleracao de dois eixos, sem separar qual eixo disparou. Uma curva "
+            "brusca aciona o mesmo criterio que uma frenagem ou uma aceleracao "
+            "forte -- o dispositivo registra 'manobra brusca', nao 'frenagem "
+            "brusca'.\n"
+            "- **O limiar de jerk de 12 m/s³ citado na Secao 2.8 e um valor de "
+            "partida, ainda sem base empirica** -- e, nesta validacao, ele nao esta "
+            "em uso: o jerk e calculado a partir do sinal, mas a deteccao aqui "
+            "depende apenas da magnitude. Portanto o que este resultado valida e a "
+            "regra de magnitude, nao o criterio combinado descrito no firmware.\n"
+            "- O firmware completo (Secao 2.8) ainda faz subtracao de gravidade por "
+            "calibracao estacionaria e media movel passa-baixa. O UAH-DriveSet ja "
+            "entrega o sinal com gravidade removida e filtrado por Kalman, entao "
+            "essas duas etapas nao sao exercitadas por esta validacao."
         )
 
 
-def render_view_validacao_hardware(validacao, calibracao, confundimento):
+def render_view_validacao_hardware(validacao, calibracao, confundimento,
+                                    histograma=None, limiares=None):
     st.info(
         "**Por que usamos o UAH-DriveSet aqui?** O UAH-DriveSet e uma base publica de "
         "terceiros, usada exclusivamente para validar se a logica de deteccao do "
@@ -978,10 +1137,21 @@ def render_view_validacao_hardware(validacao, calibracao, confundimento):
         )
         return
 
+    # O limiar recalibrado nao e escolhido aqui: vem do CSV que
+    # src/validacao_hardware.py produziu (p99.9 da conducao normal).
+    limiar_recalibrado = None
+    if limiares is not None and not limiares.empty:
+        candidatos = sorted(set(limiares["limiar_ms2"]) - {LIMIAR_LITERATURA})
+        limiar_recalibrado = candidatos[0] if candidatos else None
+
     render_metodologia_hardware(validacao)
 
     with st.container(border=True):
         render_calibracao_uah(calibracao)
+
+    if histograma is not None and limiares is not None and limiar_recalibrado is not None:
+        with st.container(border=True):
+            render_histograma_sinal(histograma, limiares, limiar_recalibrado)
 
     with st.container(border=True):
         render_anova_uah(validacao)
@@ -1216,6 +1386,8 @@ def main():
     validacao_uah = carregar_validacao_uah()
     calibracao_uah = carregar_calibracao_uah()
     confundimento_uah = carregar_confundimento_uah()
+    histograma_uah = carregar_histograma_uah()
+    limiares_uah = carregar_limiares_uah()
 
     projecao, variancia_pct = projetar_pca(normalizada)
     projecao = projecao.merge(
@@ -1232,7 +1404,8 @@ def main():
             original, mapa_perfil,
         )
     elif view == "Validacao de Hardware":
-        render_view_validacao_hardware(validacao_uah, calibracao_uah, confundimento_uah)
+        render_view_validacao_hardware(validacao_uah, calibracao_uah, confundimento_uah,
+                                        histograma_uah, limiares_uah)
     elif view == "Coligacao Conceitual":
         render_view_coligacao(original, mapa_perfil, validacao_uah)
 

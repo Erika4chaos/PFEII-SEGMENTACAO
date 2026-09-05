@@ -12,16 +12,44 @@ proprio autor do dataset:
   https://github.com/Eromera/uah_driveset_reader
   http://www.robesafe.uah.es/personal/eduardo.romera/uah-driveset/
 
-RAW_ACCELEROMETERS.txt (espaco como delimitador, sem cabecalho):
+RAW_ACCELEROMETERS.txt (espaco como delimitador, sem cabecalho) -- layout
+CONFERIDO CONTRA OS ARQUIVOS REAIS (2026-09-05), nao apenas contra a
+documentacao publica:
   0 timestamp (s desde o inicio do trajeto)
-  1 ativo_v50 (1 se velocidade > 50 km/h)
+  1 ativo_v50 (1 se velocidade > 50 km/h) -- confirmado: so assume {0, 1}
   2-4 acc_x, acc_y, acc_z brutos (Gs)
   5-7 acc_x_kf, acc_y_kf, acc_z_kf filtrados por Kalman (Gs)
-  8-10 roll, pitch, yaw (graus)
-Por convencao do dataset, Z e Y sao as aceleracoes longitudinal e lateral,
-respectivamente; X carrega componente vertical/gravitacional residual e por
-isso e excluido do calculo da magnitude de manobra -- a mesma logica que o
-firmware aplica ao subtrair a gravidade calibrada antes do limiar (Secao 2.8).
+  8-10 roll, pitch, yaw -- em RADIANOS, nao em graus como diz a documentacao
+       publica (yaw varre exatamente -pi..+pi; roll tem media ~ -pi/2).
+       Nao sao usados em nenhum calculo aqui, mas a unidade estava errada.
+
+Duas correcoes empiricas importantes em relacao ao que se supunha antes:
+
+(1) NENHUM dos seis canais de aceleracao carrega gravidade. A magnitude do
+    vetor 3-eixos dos canais "brutos" tem media ~0.05 G (e nao ~1.0 G), e a
+    media de cada canal fica proxima de zero. Ou seja, o dataset ja entrega
+    aceleracao dinamica no referencial do veiculo, com a gravidade removida
+    na origem -- este script NAO precisa subtrair gravidade, e a afirmacao
+    anterior de que o eixo X carregaria "componente gravitacional residual"
+    estava incorreta.
+
+(2) Os canais _kf sao versoes filtradas (Kalman) dos MESMOS eixos brutos --
+    confirmado por correlacao 0.73/0.89/0.93 entre cada par bruto/filtrado e
+    desvio-padrao menor no filtrado nos tres eixos. Nao sao um segundo
+    conjunto de sensores nem uma etapa de remocao de gravidade.
+
+Por convencao do dataset (ROMERA et al., 2016, Secao III), Z e Y sao as
+aceleracoes longitudinal e lateral, respectivamente -- os dois eixos que
+importam para frenagem/aceleracao/curva. X (vertical) e excluido da
+magnitude de manobra por nao corresponder a nenhuma dessas manobras.
+
+ATENCAO -- diferenca em relacao ao firmware descrito na Secao 2.8: o
+firmware completo faz subtracao de gravidade por calibracao estacionaria,
+media movel passa-baixa e usa magnitude + jerk. O que e validado aqui e uma
+versao simplificada: magnitude de 2 eixos sobre o sinal que o dataset ja
+entrega condicionado, SEM criterio de jerk (o jerk e calculado e persistido
+para inspecao, mas nao entra na deteccao). Essa diferenca precisa estar
+declarada no texto do TCC -- nao e o firmware inteiro que esta validado.
 
 RAW_GPS.txt (espaco como delimitador, sem cabecalho; opcional -- usado apenas
 para enriquecer o resumo por trajeto, a deteccao de eventos independe dele):
@@ -46,11 +74,11 @@ e testar a logica de deteccao do FIRMWARE (limiar de magnitude sobre o sinal
 bruto do acelerometro), nao reaproveitar a deteccao de outro algoritmo.
 
 Antes de reportar qualquer resultado de nao-discriminacao (taxa de eventos
-proxima de zero), este script verifica empiricamente que o sinal bruto do
-acelerometro (com gravidade, antes do filtro de Kalman) esta de fato em
-unidades de G -- ver verificar_calibracao_gravidade(). Uma taxa de eventos
-baixa so e reportada como achado real depois que essa checagem descarta
-erro de unidade/calibracao como causa alternativa.
+proxima de zero), este script confere empiricamente a taxa de amostragem, a
+faixa fisica do sinal e o efeito do filtro de Kalman -- ver
+verificar_calibracao_sinal(). Uma taxa de eventos baixa so e reportada como
+achado real depois que essas checagens descartam erro de unidade/amostragem
+como causa alternativa.
 
 Tambem persiste uma tabela de confundimento motorista x comportamento x
 tipo de via (rodovia/via secundaria): esses tres fatores nao sao
@@ -269,6 +297,69 @@ def verificar_calibracao_sinal(raiz: Path) -> list:
     ]
 
 
+def coletar_magnitudes(raiz: Path) -> pd.DataFrame:
+    """Magnitude de manobra amostra a amostra (~10 Hz), de todos os trajetos,
+    rotulada por estilo de conducao e tipo de via. E a base do histograma
+    didatico da aba 'Validacao de Hardware': ao contrario das metricas por
+    trajeto (n=40), aqui ha ~311 mil amostras, o que sustenta um histograma
+    de verdade em vez de um grafico de ruido."""
+    partes = []
+    for pasta in listar_trajetos(raiz):
+        df_acc = carregar_acelerometro(pasta / "RAW_ACCELEROMETERS.txt")
+        partes.append(pd.DataFrame({
+            "comportamento": detectar_comportamento(pasta),
+            "tipo_via": detectar_tipo_via(pasta),
+            "magnitude_ms2": calcular_magnitude_ms2(df_acc),
+        }))
+    return pd.concat(partes, ignore_index=True)
+
+
+def derivar_limiar_recalibrado(magnitudes: pd.DataFrame, percentil: float = 99.9) -> float:
+    """Limiar alternativo derivado DOS DADOS, nao da literatura: o percentil
+    99,9 da magnitude observada em trajetos NORMAIS. A regra e deliberadamente
+    simples de explicar -- 'acima disto e atipico para conducao normal' -- em
+    vez de um valor ajustado para maximizar alguma metrica, que seria dificil
+    de justificar perante a banca e sujeito a sobreajuste com n=40 trajetos."""
+    normais = magnitudes.loc[magnitudes["comportamento"] == "normal", "magnitude_ms2"]
+    return round(float(np.percentile(normais, percentil)), 1)
+
+
+def construir_histograma_magnitude(magnitudes: pd.DataFrame, n_classes: int = 14) -> pd.DataFrame:
+    """Bina a magnitude em classes de largura igual, contando amostras por
+    (estilo, tipo de via). As bordas das classes sao calculadas UMA vez para
+    o conjunto todo e reaproveitadas em todos os grupos -- se cada painel
+    tivesse suas proprias classes, a comparacao visual entre eles seria
+    invalida. O binning e feito aqui (numpy) e nao no motor do grafico para
+    que os limites de cada classe existam como dado, permitindo rotular as
+    barras e posicionar a linha do limiar exatamente."""
+    bordas = np.linspace(0.0, float(magnitudes["magnitude_ms2"].max()), n_classes + 1)
+    linhas = []
+    for (comportamento, via), grupo in magnitudes.groupby(["comportamento", "tipo_via"]):
+        contagens, _ = np.histogram(grupo["magnitude_ms2"], bins=bordas)
+        for i, n in enumerate(contagens):
+            linhas.append({
+                "comportamento": comportamento, "tipo_via": via, "classe_idx": i,
+                "classe_min": bordas[i], "classe_max": bordas[i + 1], "n_amostras": int(n),
+            })
+    return pd.DataFrame(linhas)
+
+
+def avaliar_limiares(magnitudes: pd.DataFrame, limiares: list) -> pd.DataFrame:
+    """Percentual de amostras acima de cada limiar candidato, por estilo e
+    tipo de via -- o numero que a figura exibe ao lado de cada linha de
+    limiar."""
+    linhas = []
+    for (comportamento, via), grupo in magnitudes.groupby(["comportamento", "tipo_via"]):
+        for limiar in limiares:
+            n_acima = int((grupo["magnitude_ms2"] > limiar).sum())
+            linhas.append({
+                "comportamento": comportamento, "tipo_via": via, "limiar_ms2": limiar,
+                "n_acima": n_acima, "n_total": len(grupo),
+                "pct_acima": 100 * n_acima / len(grupo),
+            })
+    return pd.DataFrame(linhas)
+
+
 def calcular_confundimento(df_resumo: pd.DataFrame) -> pd.DataFrame:
     """Contagem de trajetos por motorista x comportamento x tipo de via --
     documenta, com numeros, o quanto esses tres fatores estao cruzados
@@ -355,6 +446,34 @@ def main():
     confundimento = calcular_confundimento(df_resumo)
     print(confundimento.to_string(index=False))
     confundimento.to_csv(saida_dir / "validacao_hardware_uah_confundimento.csv", index=False)
+
+    # -----------------------------------------------------------------------
+    # Distribuicao amostra a amostra (base do histograma didatico da aba
+    # "Validacao de Hardware") + avaliacao do limiar da literatura contra um
+    # limiar recalibrado a partir destes dados.
+    # -----------------------------------------------------------------------
+    print("\n=== Distribuicao da magnitude amostra a amostra ===")
+    magnitudes = coletar_magnitudes(dataset_dir)
+    limiar_recalibrado = derivar_limiar_recalibrado(magnitudes)
+    print(f"{len(magnitudes):,} amostras a ~10 Hz")
+    print(f"Limiar da literatura: {args.limiar} m/s^2 | "
+          f"limiar recalibrado (p99.9 da conducao normal): {limiar_recalibrado} m/s^2")
+
+    histograma = construir_histograma_magnitude(magnitudes)
+    histograma.to_csv(saida_dir / "validacao_hardware_uah_histograma.csv", index=False)
+
+    limiares = avaliar_limiares(magnitudes, [args.limiar, limiar_recalibrado])
+    limiares.to_csv(saida_dir / "validacao_hardware_uah_limiares.csv", index=False)
+
+    print("\n% de amostras acima de cada limiar (todas as vias):")
+    for limiar in [args.limiar, limiar_recalibrado]:
+        print(f"  limiar {limiar} m/s^2:")
+        for comportamento, grupo in magnitudes.groupby("comportamento"):
+            n_acima = int((grupo["magnitude_ms2"] > limiar).sum())
+            print(f"    {comportamento:10s} {n_acima:6d} de {len(grupo):7,} = "
+                  f"{100 * n_acima / len(grupo):.4f}%")
+    print(f"\nHistograma salvo em: {saida_dir / 'validacao_hardware_uah_histograma.csv'}")
+    print(f"Limiares salvos em:  {saida_dir / 'validacao_hardware_uah_limiares.csv'}")
 
     caminho_saida = saida_dir / "validacao_hardware_uah_driveset.csv"
     df_resumo.to_csv(caminho_saida, index=False)
