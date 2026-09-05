@@ -764,25 +764,32 @@ def render_grafico_eventos_comportamento(validacao: pd.DataFrame):
     st.markdown("##### Aceleracao de pico, por rotulo comportamental")
     st.caption(
         "Esta e a metrica que discrimina significativamente entre os tres grupos "
-        "(ver ANOVA acima). Cada barra e um trajeto -- quanto mais a distribuicao de "
-        "uma cor esta deslocada para a direita, mais bruscas foram as manobras mais "
-        "fortes registradas naquele grupo."
+        "(ver ANOVA acima). Um histograma por grupo, no mesmo eixo -- quanto mais a "
+        "distribuicao de um grupo esta deslocada para a direita, mais bruscas foram "
+        "as manobras mais fortes registradas naquele grupo."
     )
     dados = validacao[validacao["comportamento"] != "desconhecido"].copy()
     dados["ComportamentoLabel"] = dados["comportamento"].map(COMPORTAMENTO_LABEL)
     ordem = ["Normal", "Agressiva", "Sonolenta"]
     cores = [COMPORTAMENTO_COR["normal"], COMPORTAMENTO_COR["agressiva"], COMPORTAMENTO_COR["sonolenta"]]
+    extensao = [0, float(dados["magnitude_maxima_ms2"].max()) + 0.5]
 
-    grafico = alt.Chart(dados).mark_bar(opacity=0.65).encode(
-        x=alt.X("magnitude_maxima_ms2:Q", bin=alt.Bin(maxbins=15), title="Aceleracao de pico do trajeto (m/s^2)"),
-        y=alt.Y("count()", title="Numero de trajetos", stack=None),
+    grafico = alt.Chart(dados).mark_bar().encode(
+        x=alt.X("magnitude_maxima_ms2:Q", bin=alt.Bin(extent=extensao, maxbins=12),
+                 title="Aceleracao de pico do trajeto (m/s^2)"),
+        y=alt.Y("count()", title="Numero de trajetos"),
         color=alt.Color(
-            "ComportamentoLabel:N", title="Comportamento",
+            "ComportamentoLabel:N", title=None, legend=None,
             scale=alt.Scale(domain=ordem, range=cores),
         ),
         tooltip=["ComportamentoLabel", "count()"],
-    ).properties(height=280)
-    st.altair_chart(grafico, width="stretch")
+    ).properties(width=250, height=240).facet(
+        column=alt.Column(
+            "ComportamentoLabel:N", title=None, sort=ordem,
+            header=alt.Header(labelFontSize=13, labelFontWeight="bold"),
+        ),
+    )
+    st.altair_chart(grafico)
 
     st.markdown("###### Trajetos que ultrapassaram o limiar do firmware (~6 m/s^2)")
     st.caption(
@@ -839,21 +846,27 @@ def render_binario_uah(validacao: pd.DataFrame):
     st.caption(
         "Eventos por minuto fica perto de zero para os dois grupos (ver cartoes "
         "acima e aviso na secao anterior) -- a diferenca fica mais visivel olhando a "
-        "distribuicao da aceleracao de pico de cada trajeto. Barras sobrepostas (nao "
-        "empilhadas); quanto mais a cor rosa aparece deslocada para a direita, mais "
-        "trajetos de mau comportamento tiveram picos altos."
+        "distribuicao da aceleracao de pico de cada trajeto. Um histograma por "
+        "grupo, no mesmo eixo, para comparacao direta."
     )
     cores = [COMPORTAMENTO_BINARIO_COR[o] for o in ordem]
-    grafico = alt.Chart(dados).mark_bar(opacity=0.65).encode(
-        x=alt.X("magnitude_maxima_ms2:Q", bin=alt.Bin(maxbins=15), title="Aceleracao de pico do trajeto (m/s^2)"),
-        y=alt.Y("count()", title="Numero de trajetos", stack=None),
+    extensao = [0, float(dados["magnitude_maxima_ms2"].max()) + 0.5]
+    grafico = alt.Chart(dados).mark_bar().encode(
+        x=alt.X("magnitude_maxima_ms2:Q", bin=alt.Bin(extent=extensao, maxbins=12),
+                 title="Aceleracao de pico do trajeto (m/s^2)"),
+        y=alt.Y("count()", title="Numero de trajetos"),
         color=alt.Color(
-            "ComportamentoBinario:N", title=None,
+            "ComportamentoBinario:N", title=None, legend=None,
             scale=alt.Scale(domain=ordem, range=cores),
         ),
         tooltip=["ComportamentoBinario", "count()"],
-    ).properties(height=260)
-    st.altair_chart(grafico, width="stretch")
+    ).properties(width=340, height=240).facet(
+        column=alt.Column(
+            "ComportamentoBinario:N", title=None, sort=ordem,
+            header=alt.Header(labelFontSize=13, labelFontWeight="bold"),
+        ),
+    )
+    st.altair_chart(grafico)
 
     st.markdown("###### Trajetos que ultrapassaram o limiar do firmware (~6 m/s^2)")
     resumo_evento = _contagem_com_evento(dados, "ComportamentoBinario", ordem)
