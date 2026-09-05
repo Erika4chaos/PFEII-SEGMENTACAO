@@ -68,6 +68,18 @@ COMPORTAMENTO_COR = {
     "sonolenta": "#8a6d3b", "desconhecido": "#9a90a3",
 }
 
+# Agregacao simplificada dos tres rotulos em duas categorias -- ver
+# render_binario_uah(): normal e o unico rotulo "sem sinal de risco", os
+# outros dois viram "Mau comportamento". Cores reaproveitam a mesma
+# paleta (verde/rosa) usada para normal/agressiva acima, para leitura
+# consistente entre a visao de tres grupos e a visao binaria.
+COMPORTAMENTO_BINARIO_LABEL = {
+    "normal": "Bom comportamento", "agressiva": "Mau comportamento", "sonolenta": "Mau comportamento",
+}
+COMPORTAMENTO_BINARIO_COR = {
+    "Bom comportamento": CORES_PERFIL[2], "Mau comportamento": CORES_PERFIL[1],
+}
+
 
 def _fmt_brl(valor: float) -> str:
     return f"R$ {valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
@@ -480,7 +492,51 @@ def render_tabela_perfis(kpis_cluster: pd.DataFrame):
     )
 
 
-def render_view_visao_geral(projecao, kpis_cluster, gerais, significancia, perfil_sel_nome):
+def render_histograma_variavel(original: pd.DataFrame, mapa_perfil: dict):
+    st.markdown("##### Distribuicao das variaveis de entrada")
+    st.caption(
+        "Como uma das 19 variaveis derivadas (Quadro 2) usadas no K-Means se "
+        "distribui na carteira, antes de ver os resultados da clusterizacao abaixo."
+    )
+    col_var, col_toggle = st.columns([3, 1])
+    with col_var:
+        indice_padrao = COLUNAS_19.index("premio_por_veiculo") if "premio_por_veiculo" in COLUNAS_19 else 0
+        variavel = st.selectbox("Variavel", COLUNAS_19, index=indice_padrao, key="hist_variavel")
+    with col_toggle:
+        st.markdown("<div style='margin-top:1.7rem;'></div>", unsafe_allow_html=True)
+        sobrepor = st.toggle("Sobrepor por perfil", value=False, key="hist_sobrepor")
+
+    dados = original.copy()
+    dados["perfil_numero"] = dados["cluster"].map(mapa_perfil)
+    dados["nome_perfil"] = dados["perfil_numero"].map(NOME_PERFIL)
+
+    if sobrepor:
+        ordem_nomes = [NOME_PERFIL[n] for n in sorted(dados["perfil_numero"].unique())]
+        ordem_cores = [CORES_PERFIL[n] for n in sorted(dados["perfil_numero"].unique())]
+        grafico = alt.Chart(dados).mark_bar(opacity=0.6).encode(
+            x=alt.X(f"{variavel}:Q", bin=alt.Bin(maxbins=30), title=variavel),
+            y=alt.Y("count()", title="Numero de apolices", stack=None),
+            color=alt.Color(
+                "nome_perfil:N", title="Perfil",
+                scale=alt.Scale(domain=ordem_nomes, range=ordem_cores),
+            ),
+            tooltip=["nome_perfil", "count()"],
+        ).properties(height=300)
+        st.caption(
+            "Barras sobrepostas (nao empilhadas), uma cor por perfil -- a mesma "
+            "paleta do grafico de clusters no espaco PCA."
+        )
+    else:
+        grafico = alt.Chart(dados).mark_bar(color=COR_LINHA_DESTAQUE).encode(
+            x=alt.X(f"{variavel}:Q", bin=alt.Bin(maxbins=30), title=variavel),
+            y=alt.Y("count()", title="Numero de apolices"),
+            tooltip=["count()"],
+        ).properties(height=300)
+    st.altair_chart(grafico, width="stretch")
+
+
+def render_view_visao_geral(projecao, kpis_cluster, gerais, significancia, perfil_sel_nome,
+                             original, mapa_perfil):
     perfil_sel_numero = None
     dados_kpi = gerais
     if perfil_sel_nome != CARTEIRA_COMPLETA:
@@ -490,6 +546,9 @@ def render_view_visao_geral(projecao, kpis_cluster, gerais, significancia, perfi
 
     st.subheader("KPIs")
     render_linha_kpis(dados_kpi)
+
+    with st.container(border=True):
+        render_histograma_variavel(original, mapa_perfil)
 
     col_scatter, col_insights = st.columns([1.5, 1])
     with col_scatter:
@@ -567,7 +626,7 @@ def render_view_validacao_indices(normalizada, validacao_k, significancia):
 
 
 def render_view_segmentacao(projecao, variancia_pct, kpis_cluster, gerais, significancia,
-                             normalizada, validacao_k):
+                             normalizada, validacao_k, original, mapa_perfil):
     opcoes_segmento = [CARTEIRA_COMPLETA] + kpis_cluster["nome_perfil"].tolist()
     segmento_selecionado = st.pills(
         "Filtrar por perfil", opcoes_segmento, default=CARTEIRA_COMPLETA, key="segmento_pills",
@@ -579,7 +638,9 @@ def render_view_segmentacao(projecao, variancia_pct, kpis_cluster, gerais, signi
         ["Visao geral", "Clusters (PCA)", "Validacao e insights"]
     )
     with aba_geral:
-        render_view_visao_geral(projecao, kpis_cluster, gerais, significancia, segmento_selecionado)
+        render_view_visao_geral(
+            projecao, kpis_cluster, gerais, significancia, segmento_selecionado, original, mapa_perfil
+        )
     with aba_clusters:
         render_view_clusters(projecao, variancia_pct)
     with aba_validacao:
@@ -705,6 +766,58 @@ def render_grafico_eventos_comportamento(validacao: pd.DataFrame):
     st.altair_chart(grafico, width="stretch")
 
 
+def render_binario_uah(validacao: pd.DataFrame):
+    st.markdown("##### Visao simplificada: bom vs. mau comportamento")
+    st.caption(
+        "**Nao e uma analise nova ou concorrente** -- e a mesma ANOVA de tres grupos "
+        "mostrada acima, apenas agregada em duas categorias para leitura rapida: "
+        "normal vira 'Bom comportamento'; agressiva e sonolenta viram 'Mau "
+        "comportamento'."
+    )
+    dados = validacao[validacao["comportamento"] != "desconhecido"].copy()
+    dados["ComportamentoBinario"] = dados["comportamento"].map(COMPORTAMENTO_BINARIO_LABEL)
+
+    ordem = ["Bom comportamento", "Mau comportamento"]
+    resumo = dados.groupby("ComportamentoBinario").agg(
+        n=("trajeto", "count"),
+        eventos_por_min_medio=("eventos_por_min", "mean"),
+        magnitude_maxima_media=("magnitude_maxima_ms2", "mean"),
+    ).reindex(ordem)
+
+    colunas = st.columns(2)
+    for coluna, rotulo in zip(colunas, ordem):
+        linha = resumo.loc[rotulo]
+        with coluna:
+            with st.container(border=True):
+                cor = COMPORTAMENTO_BINARIO_COR[rotulo]
+                st.markdown(
+                    f'<span class="tag-pill" style="background:{cor};">{rotulo}</span> '
+                    f'<span style="color:var(--muted);font-size:12px;">n={int(linha["n"])} trajetos</span>',
+                    unsafe_allow_html=True,
+                )
+                col_a, col_b = st.columns(2)
+                col_a.metric("Eventos/min (media)", f"{linha['eventos_por_min_medio']:.3f}")
+                col_b.metric("Pico medio (m/s^2)", f"{linha['magnitude_maxima_media']:.2f}")
+
+    cores = [COMPORTAMENTO_BINARIO_COR[o] for o in ordem]
+    grafico = alt.Chart(dados).mark_bar(opacity=0.6).encode(
+        x=alt.X("eventos_por_min:Q", bin=alt.Bin(maxbins=20), title="Eventos por minuto (limiar ~6 m/s^2)"),
+        y=alt.Y("count()", title="Numero de trajetos", stack=None),
+        color=alt.Color(
+            "ComportamentoBinario:N", title=None,
+            scale=alt.Scale(domain=ordem, range=cores),
+        ),
+        tooltip=["ComportamentoBinario", "count()"],
+    ).properties(height=260)
+    st.altair_chart(grafico, width="stretch")
+    st.caption(
+        "Barras sobrepostas (nao empilhadas) das duas categorias -- a maioria dos "
+        "trajetos de ambos os grupos fica em 0 eventos/min (ver aviso na secao "
+        "acima); o grafico mostra visualmente o quanto (ou pouco) o grupo de mau "
+        "comportamento se desloca para taxas mais altas."
+    )
+
+
 def render_tabela_trajetos(validacao: pd.DataFrame):
     st.markdown("##### Trajetos do UAH-DriveSet")
     st.caption(
@@ -811,6 +924,9 @@ def render_view_validacao_hardware(validacao, calibracao, confundimento):
     with st.container(border=True):
         render_anova_uah(validacao)
         render_grafico_eventos_comportamento(validacao)
+
+    with st.container(border=True):
+        render_binario_uah(validacao)
 
     with st.container(border=True):
         render_tabela_trajetos(validacao)
@@ -1050,7 +1166,8 @@ def main():
 
     if view == "Segmentacao":
         render_view_segmentacao(
-            projecao, variancia_pct, kpis_cluster, gerais, significancia, normalizada, validacao_k
+            projecao, variancia_pct, kpis_cluster, gerais, significancia, normalizada, validacao_k,
+            original, mapa_perfil,
         )
     elif view == "Validacao de Hardware":
         render_view_validacao_hardware(validacao_uah, calibracao_uah, confundimento_uah)
