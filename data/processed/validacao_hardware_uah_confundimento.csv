@@ -1,0 +1,36 @@
+motorista,comportamento,tipo_via,n_trajetos
+D1,agressiva,Rodovia,1
+D1,agressiva,Via secundaria,1
+D1,normal,Rodovia,1
+D1,normal,Via secundaria,2
+D1,sonolenta,Rodovia,1
+D1,sonolenta,Via secundaria,1
+D2,agressiva,Rodovia,1
+D2,agressiva,Via secundaria,1
+D2,normal,Rodovia,1
+D2,normal,Via secundaria,2
+D2,sonolenta,Rodovia,1
+D2,sonolenta,Via secundaria,1
+D3,agressiva,Rodovia,1
+D3,agressiva,Via secundaria,1
+D3,normal,Rodovia,1
+D3,normal,Via secundaria,2
+D3,sonolenta,Rodovia,1
+D3,sonolenta,Via secundaria,1
+D4,agressiva,Rodovia,1
+D4,agressiva,Via secundaria,1
+D4,normal,Rodovia,1
+D4,normal,Via secundaria,2
+D4,sonolenta,Rodovia,1
+D4,sonolenta,Via secundaria,1
+D5,agressiva,Rodovia,1
+D5,agressiva,Via secundaria,1
+D5,normal,Rodovia,1
+D5,normal,Via secundaria,2
+D5,sonolenta,Rodovia,1
+D5,sonolenta,Via secundaria,1
+D6,agressiva,Rodovia,1
+D6,normal,Rodovia,1
+D6,normal,Via secundaria,1
+D6,sonolenta,Rodovia,1
+D6,sonolenta,Via secundaria,1

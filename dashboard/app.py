@@ -116,10 +116,25 @@ def carregar_validacao_uah():
         return None
     df = pd.read_csv(caminho)
     df["ComportamentoLabel"] = df["comportamento"].map(COMPORTAMENTO_LABEL).fillna(df["comportamento"])
-    df["tipo_via"] = df["trajeto"].apply(
-        lambda t: "Rodovia" if "MOTORWAY" in t.upper() else ("Via secundaria" if "SECONDARY" in t.upper() else "desconhecido")
-    )
     return df
+
+
+@st.cache_data
+def carregar_calibracao_uah():
+    """Checagens empiricas de calibracao do sinal (taxa de amostragem,
+    teto fisico plausivel, reducao de ruido pelo filtro de Kalman), ja
+    calculadas por src/validacao_hardware.py::verificar_calibracao_sinal
+    -- exibidas aqui para que o resultado de nao-discriminacao da taxa de
+    eventos (ver render_anova_uah) nao seja apresentado sem antes descartar
+    um problema de unidade/amostragem como causa alternativa (Secao B.5)."""
+    caminho = DADOS_DIR / "validacao_hardware_uah_calibracao.csv"
+    return pd.read_csv(caminho) if caminho.exists() else None
+
+
+@st.cache_data
+def carregar_confundimento_uah():
+    caminho = DADOS_DIR / "validacao_hardware_uah_confundimento.csv"
+    return pd.read_csv(caminho) if caminho.exists() else None
 
 
 def calcular_anova_uah(validacao: pd.DataFrame, coluna: str):
@@ -595,50 +610,77 @@ def render_metodologia_hardware(validacao: pd.DataFrame):
     )
 
 
+def render_calibracao_uah(calibracao: pd.DataFrame):
+    st.markdown("##### Verificacao de calibracao do sinal")
+    st.caption(
+        "Checagens empiricas feitas por src/validacao_hardware.py ANTES de reportar "
+        "qualquer resultado de nao-discriminacao abaixo -- para descartar erro de "
+        "unidade/amostragem como causa alternativa de uma taxa de eventos baixa "
+        "(Secao B.5), em vez de assumir que o sinal esta correto."
+    )
+    if calibracao is None or calibracao.empty:
+        st.caption("Execute src/validacao_hardware.py para gerar as checagens de calibracao.")
+        return
+    colunas = st.columns(len(calibracao))
+    for coluna, (_, linha) in zip(colunas, calibracao.iterrows()):
+        with coluna:
+            icone = "✅" if linha["status"] == "ok" else "⚠️"
+            st.markdown(f"{icone} **{linha['valor_observado']}**")
+            st.caption(f"{linha['verificacao']} (esperado: {linha['valor_esperado']})")
+
+
 def render_anova_uah(validacao: pd.DataFrame):
     st.markdown("##### Discriminacao por comportamento (ANOVA one-way)")
     st.caption(
-        "F e p referem-se a diferenca de medias entre normal / agressiva / sonolenta. "
-        "p < 0,05 indica que o rotulo comportamental explica parte da variacao "
-        "observada na metrica."
+        "F e p referem-se a diferenca de medias entre normal / agressiva / sonolenta; "
+        "n e o numero de trajetos em cada grupo (pequeno e desigual -- ver "
+        "confundimento abaixo). p < 0,05 indica que o rotulo comportamental explica "
+        "parte da variacao observada na metrica."
     )
+    conhecidos = validacao[validacao["comportamento"] != "desconhecido"]
+    n_por_grupo = conhecidos.groupby("ComportamentoLabel").size().to_dict()
+    legenda_n = " · ".join(f"{rotulo}: n={n}" for rotulo, n in n_por_grupo.items())
+    st.caption(f"**{legenda_n}**")
+
     resultado_eventos = calcular_anova_uah(validacao, "eventos_por_min")
+    resultado_pico = calcular_anova_uah(validacao, "magnitude_maxima_ms2")
     resultado_velocidade = calcular_anova_uah(validacao, "velocidade_media_kmh")
 
-    col1, col2 = st.columns(2)
-    with col1:
-        if resultado_eventos is not None:
-            st.metric(
-                "Eventos/min ~ comportamento",
-                f"F={resultado_eventos.statistic:.2f}",
-                f"p={resultado_eventos.pvalue:.3f}",
-                delta_color="off",
-            )
-        else:
-            st.metric("Eventos/min ~ comportamento", "n/d")
-    with col2:
-        if resultado_velocidade is not None:
-            st.metric(
-                "Velocidade media ~ comportamento",
-                f"F={resultado_velocidade.statistic:.2f}",
-                f"p={resultado_velocidade.pvalue:.3f}",
-                delta_color="off",
-            )
-        else:
-            st.metric("Velocidade media ~ comportamento", "n/d")
+    col1, col2, col3 = st.columns(3)
+    for coluna, rotulo, resultado in [
+        (col1, "Eventos/min ~ comportamento", resultado_eventos),
+        (col2, "Aceleracao de pico ~ comportamento", resultado_pico),
+        (col3, "Velocidade media ~ comportamento", resultado_velocidade),
+    ]:
+        with coluna:
+            if resultado is not None:
+                st.metric(rotulo, f"F={resultado.statistic:.2f}", f"p={resultado.pvalue:.3f}", delta_color="off")
+            else:
+                st.metric(rotulo, "n/d")
 
-    if resultado_eventos is not None and resultado_eventos.pvalue >= 0.05:
+    pico_significativo = resultado_pico is not None and resultado_pico.pvalue < 0.05
+    eventos_nao_significativo = resultado_eventos is not None and resultado_eventos.pvalue >= 0.05
+    if eventos_nao_significativo and pico_significativo:
         st.warning(
             "**A taxa de eventos por minuto nao discrimina significativamente entre "
-            "os rotulos comportamentais nesta amostra (p >= 0,05).** O limiar de ~6 "
-            "m/s^2, aplicado ao sinal real e continuo do acelerometro, e raramente "
-            "ultrapassado mesmo em trajetos rotulados como agressivos -- eventos de "
-            "conducao agressiva costumam ser picos breves (fracao de segundo), nao um "
-            "patamar sustentado, o que limita o poder de deteccao de um limiar unico "
-            "de magnitude sobre poucos minutos de trajeto. A velocidade media, por "
-            "outro lado, discrimina significativamente: trajetos agressivos deste "
-            "dataset sao, em media, mais rapidos -- um sinal correlacionado, mas nao "
-            "equivalente ao que o firmware mede."
+            "os rotulos comportamentais (p >= 0,05) -- mas a aceleracao de pico, sim "
+            "(p < 0,05).** O sinal de fato registra picos maiores em trajetos "
+            "agressivos; o que perde poder discriminativo e o LIMIAR fixo de ~6 m/s^2 "
+            "aplicado sobre ele -- picos de conducao agressiva sao breves (fracao de "
+            "segundo) e raramente cruzam esse patamar especifico, mesmo quando estao "
+            "visivelmente mais altos que o normal. A velocidade media tambem "
+            "discrimina significativamente, mas correlaciona com o tipo de via "
+            "(ver confundimento abaixo), entao nao deve ser lida como um efeito puro "
+            "do rotulo comportamental."
+        )
+    elif eventos_nao_significativo:
+        st.warning(
+            "**A taxa de eventos por minuto nao discrimina significativamente entre "
+            "os rotulos comportamentais nesta amostra (p >= 0,05).** As checagens de "
+            "calibracao acima nao indicam erro de unidade/amostragem -- a leitura mais "
+            "provavel e que o limiar fixo de ~6 m/s^2 e raramente cruzado mesmo em "
+            "trajetos agressivos, dado o curto tempo de trajeto e a natureza breve "
+            "desses picos."
         )
 
 
@@ -693,11 +735,55 @@ def render_tabela_trajetos(validacao: pd.DataFrame):
         "autores do dataset ao gravar o trajeto, nao inferido por este projeto. "
         "`Tipo de via` -- rodovia ou via secundaria, extraido do nome do trajeto; "
         "trajetos de rodovia tendem a velocidade media mais alta, um fator "
-        "parcialmente confundido com o rotulo comportamental (ver aviso acima)."
+        "parcialmente confundido com o rotulo comportamental (ver confundimento abaixo)."
     )
 
 
-def render_view_validacao_hardware(validacao):
+def render_confundimento_uah(confundimento: pd.DataFrame):
+    st.markdown("##### Confundimento motorista x comportamento x tipo de via")
+    if confundimento is None or confundimento.empty:
+        st.caption("Execute src/validacao_hardware.py para gerar a tabela de confundimento.")
+        return
+    st.caption(
+        "Numero de trajetos em cada combinacao. Motorista, comportamento e tipo de "
+        "via NAO sao totalmente cruzados neste dataset -- celulas ausentes (n=0, nao "
+        "listadas abaixo) significam que aquele motorista nao tem trajeto naquela "
+        "combinacao, entao nenhuma conclusao por motorista ou por tipo de via deve "
+        "ser tirada isoladamente desta validacao."
+    )
+    tabela = confundimento.rename(columns={
+        "motorista": "Motorista", "comportamento": "Comportamento",
+        "tipo_via": "Tipo de via", "n_trajetos": "N. trajetos",
+    })
+    st.dataframe(tabela, width="stretch", hide_index=True)
+
+
+def render_limitacoes_hardware():
+    with st.expander("Limitacoes desta validacao (Secao 3.8)", expanded=False):
+        st.markdown(
+            "- O rotulo comportamental (normal/agressiva/sonolenta) e atribuido ao "
+            "**trajeto inteiro**, por instrucao ao motorista ou pelos autores do "
+            "dataset no momento da coleta -- nao e verificado evento a evento por "
+            "este projeto.\n"
+            "- Em particular, **'sonolenta' e um estilo de conducao instruido durante "
+            "a coleta, nao uma medida fisiologica de sonolencia** -- esta validacao "
+            "nao demonstra deteccao clinica ou fisiologicamente verificada de "
+            "sonolencia, apenas se o sinal cinematico discrimina esse estilo "
+            "instruido dos demais.\n"
+            "- Motorista, comportamento e tipo de via so sao parcialmente cruzados "
+            "(ver tabela de confundimento acima) -- conclusoes por motorista "
+            "isolado, ou que atribuam um efeito de velocidade puramente ao "
+            "comportamento sem considerar o tipo de via, nao sao sustentadas por "
+            "esta amostra.\n"
+            "- Amostra pequena e desigual por grupo (n=11 a 17 trajetos por rotulo "
+            "comportamental) -- tratada como checagem de viabilidade/discriminacao, "
+            "nao como validacao estatisticamente dimensionada, na mesma postura "
+            "adotada pelos testes de bancada e rodagem no veiculo do autor "
+            "(Secao 3.3)."
+        )
+
+
+def render_view_validacao_hardware(validacao, calibracao, confundimento):
     if validacao is None or validacao.empty:
         st.error(
             "Nenhum resultado de validacao de hardware encontrado em data/processed/. "
@@ -708,11 +794,17 @@ def render_view_validacao_hardware(validacao):
     render_metodologia_hardware(validacao)
 
     with st.container(border=True):
+        render_calibracao_uah(calibracao)
+
+    with st.container(border=True):
         render_anova_uah(validacao)
         render_grafico_eventos_comportamento(validacao)
 
     with st.container(border=True):
         render_tabela_trajetos(validacao)
+        render_confundimento_uah(confundimento)
+
+    render_limitacoes_hardware()
 
 
 # ---------------------------------------------------------------------------
@@ -880,6 +972,8 @@ def render_view_exportar():
         "Testes de significancia por variavel": "perfis_testes_significancia.csv",
         "Curva de validacao de k (cotovelo/silhouette)": "validacao_k.csv",
         "Resumo por trajeto (UAH-DriveSet)": "validacao_hardware_uah_driveset.csv",
+        "Checagens de calibracao do sinal (UAH-DriveSet)": "validacao_hardware_uah_calibracao.csv",
+        "Confundimento motorista x comportamento x via (UAH-DriveSet)": "validacao_hardware_uah_confundimento.csv",
     }
     for titulo, nome_arquivo in arquivos.items():
         caminho = DADOS_DIR / nome_arquivo
@@ -927,6 +1021,8 @@ def main():
     significancia = carregar_significancia()
     validacao_k = carregar_validacao_k()
     validacao_uah = carregar_validacao_uah()
+    calibracao_uah = carregar_calibracao_uah()
+    confundimento_uah = carregar_confundimento_uah()
 
     projecao, variancia_pct = projetar_pca(normalizada)
     projecao = projecao.merge(
@@ -942,7 +1038,7 @@ def main():
             projecao, variancia_pct, kpis_cluster, gerais, significancia, normalizada, validacao_k
         )
     elif view == "Validacao de Hardware":
-        render_view_validacao_hardware(validacao_uah)
+        render_view_validacao_hardware(validacao_uah, calibracao_uah, confundimento_uah)
     elif view == "Coligacao Conceitual":
         render_view_coligacao(original, mapa_perfil, validacao_uah)
 
