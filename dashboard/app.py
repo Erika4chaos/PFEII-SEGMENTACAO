@@ -693,6 +693,13 @@ def render_calibracao_uah(calibracao: pd.DataFrame):
 def render_anova_uah(validacao: pd.DataFrame):
     st.markdown("##### Discriminacao por comportamento (ANOVA one-way)")
     st.caption(
+        "**Eventos por minuto** = quantas vezes, em media, o firmware detectaria uma "
+        "manobra brusca (frenagem, aceleracao ou curva acima de ~6 m/s^2) a cada "
+        "minuto de viagem. **Aceleracao de pico** = a maior magnitude de aceleracao "
+        "medida no trajeto, em m/s^2 -- quanto maior, mais brusca foi a manobra mais "
+        "forte registrada."
+    )
+    st.caption(
         "F e p referem-se a diferenca de medias entre normal / agressiva / sonolenta; "
         "n e o numero de trajetos em cada grupo (pequeno e desigual -- ver "
         "confundimento abaixo). p < 0,05 indica que o rotulo comportamental explica "
@@ -745,25 +752,53 @@ def render_anova_uah(validacao: pd.DataFrame):
         )
 
 
+def _contagem_com_evento(dados: pd.DataFrame, coluna_grupo: str, ordem: list) -> pd.DataFrame:
+    return (
+        dados.groupby(coluna_grupo)
+        .apply(lambda g: pd.Series({"com_evento": int((g["n_eventos"] > 0).sum()), "total": len(g)}), include_groups=False)
+        .reindex(ordem)
+    )
+
+
 def render_grafico_eventos_comportamento(validacao: pd.DataFrame):
-    st.markdown("##### Eventos por minuto, por rotulo comportamental")
+    st.markdown("##### Aceleracao de pico, por rotulo comportamental")
+    st.caption(
+        "Esta e a metrica que discrimina significativamente entre os tres grupos "
+        "(ver ANOVA acima) -- quanto mais alta a caixa, mais brusca foi a manobra "
+        "mais forte registrada naquele trajeto. Cada ponto fora da caixa e um "
+        "trajeto com pico bem acima ou abaixo do tipico do seu grupo."
+    )
     dados = validacao[validacao["comportamento"] != "desconhecido"].copy()
     dados["ComportamentoLabel"] = dados["comportamento"].map(COMPORTAMENTO_LABEL)
     ordem = ["Normal", "Agressiva", "Sonolenta"]
     cores = [COMPORTAMENTO_COR["normal"], COMPORTAMENTO_COR["agressiva"], COMPORTAMENTO_COR["sonolenta"]]
 
-    grafico = alt.Chart(dados).mark_point(size=90, filled=True, opacity=0.75).encode(
+    grafico = alt.Chart(dados).mark_boxplot(size=45, outliers=True).encode(
         x=alt.X("ComportamentoLabel:N", title=None, sort=ordem, axis=alt.Axis(labelAngle=0)),
-        y=alt.Y("eventos_por_min:Q", title="Eventos por minuto (limiar ~6 m/s^2)"),
+        y=alt.Y("magnitude_maxima_ms2:Q", title="Aceleracao de pico do trajeto (m/s^2)"),
         color=alt.Color(
-            "ComportamentoLabel:N", title="Comportamento",
+            "ComportamentoLabel:N", title=None, legend=None,
             scale=alt.Scale(domain=ordem, range=cores),
         ),
-        tooltip=["motorista", "trajeto", "ComportamentoLabel",
-                 alt.Tooltip("eventos_por_min:Q", format=".3f"),
-                 alt.Tooltip("magnitude_maxima_ms2:Q", format=".2f")],
     ).properties(height=280)
     st.altair_chart(grafico, width="stretch")
+
+    st.markdown("###### Trajetos que ultrapassaram o limiar do firmware (~6 m/s^2)")
+    st.caption(
+        "Como o limiar e raramente cruzado (ver aviso acima), a contagem direta de "
+        "trajetos com pelo menos um evento detectado e mais facil de ler do que a "
+        "taxa de eventos por minuto, que fica perto de zero na quase totalidade dos "
+        "casos."
+    )
+    resumo = _contagem_com_evento(dados, "ComportamentoLabel", ordem)
+    colunas = st.columns(3)
+    for coluna, rotulo in zip(colunas, ordem):
+        linha = resumo.loc[rotulo]
+        with coluna:
+            st.metric(
+                rotulo, f"{int(linha['com_evento'])} de {int(linha['total'])}",
+                "trajetos com evento", delta_color="off",
+            )
 
 
 def render_binario_uah(validacao: pd.DataFrame):
@@ -799,23 +834,33 @@ def render_binario_uah(validacao: pd.DataFrame):
                 col_a.metric("Eventos/min (media)", f"{linha['eventos_por_min_medio']:.3f}")
                 col_b.metric("Pico medio (m/s^2)", f"{linha['magnitude_maxima_media']:.2f}")
 
+    st.markdown("###### Aceleracao de pico: bom vs. mau comportamento")
+    st.caption(
+        "Eventos por minuto fica perto de zero para os dois grupos (ver cartoes "
+        "acima e aviso na secao anterior) -- a diferenca fica mais visivel olhando a "
+        "aceleracao de pico de cada trajeto."
+    )
     cores = [COMPORTAMENTO_BINARIO_COR[o] for o in ordem]
-    grafico = alt.Chart(dados).mark_bar(opacity=0.6).encode(
-        x=alt.X("eventos_por_min:Q", bin=alt.Bin(maxbins=20), title="Eventos por minuto (limiar ~6 m/s^2)"),
-        y=alt.Y("count()", title="Numero de trajetos", stack=None),
+    grafico = alt.Chart(dados).mark_boxplot(size=50, outliers=True).encode(
+        x=alt.X("ComportamentoBinario:N", title=None, sort=ordem, axis=alt.Axis(labelAngle=0, labelLimit=200)),
+        y=alt.Y("magnitude_maxima_ms2:Q", title="Aceleracao de pico do trajeto (m/s^2)"),
         color=alt.Color(
-            "ComportamentoBinario:N", title=None,
+            "ComportamentoBinario:N", title=None, legend=None,
             scale=alt.Scale(domain=ordem, range=cores),
         ),
-        tooltip=["ComportamentoBinario", "count()"],
     ).properties(height=260)
     st.altair_chart(grafico, width="stretch")
-    st.caption(
-        "Barras sobrepostas (nao empilhadas) das duas categorias -- a maioria dos "
-        "trajetos de ambos os grupos fica em 0 eventos/min (ver aviso na secao "
-        "acima); o grafico mostra visualmente o quanto (ou pouco) o grupo de mau "
-        "comportamento se desloca para taxas mais altas."
-    )
+
+    st.markdown("###### Trajetos que ultrapassaram o limiar do firmware (~6 m/s^2)")
+    resumo_evento = _contagem_com_evento(dados, "ComportamentoBinario", ordem)
+    colunas = st.columns(2)
+    for coluna, rotulo in zip(colunas, ordem):
+        linha = resumo_evento.loc[rotulo]
+        with coluna:
+            st.metric(
+                rotulo, f"{int(linha['com_evento'])} de {int(linha['total'])}",
+                "trajetos com evento", delta_color="off",
+            )
 
 
 def render_tabela_trajetos(validacao: pd.DataFrame):
