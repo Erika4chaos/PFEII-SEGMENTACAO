@@ -1,0 +1,13 @@
+comportamento,tipo_via,limiar_ms2,n_acima,n_total,pct_acima
+agressiva,Rodovia,6.0,0,50550,0.0
+agressiva,Rodovia,2.9,2293,50550,4.536102868447082
+agressiva,Via secundaria,6.0,0,29117,0.0
+agressiva,Via secundaria,2.9,21,29117,0.07212281485043102
+normal,Rodovia,6.0,0,56216,0.0
+normal,Rodovia,2.9,122,56216,0.21702006546179023
+normal,Via secundaria,6.0,0,75650,0.0
+normal,Via secundaria,2.9,0,75650,0.0
+sonolenta,Rodovia,6.0,2,60624,0.003299023489047242
+sonolenta,Rodovia,2.9,4807,60624,7.929202955925046
+sonolenta,Via secundaria,6.0,0,39228,0.0
+sonolenta,Via secundaria,2.9,23,39228,0.058631589680840215
