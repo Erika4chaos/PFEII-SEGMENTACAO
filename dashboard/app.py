@@ -764,22 +764,23 @@ def render_grafico_eventos_comportamento(validacao: pd.DataFrame):
     st.markdown("##### Aceleracao de pico, por rotulo comportamental")
     st.caption(
         "Esta e a metrica que discrimina significativamente entre os tres grupos "
-        "(ver ANOVA acima) -- quanto mais alta a caixa, mais brusca foi a manobra "
-        "mais forte registrada naquele trajeto. Cada ponto fora da caixa e um "
-        "trajeto com pico bem acima ou abaixo do tipico do seu grupo."
+        "(ver ANOVA acima). Cada barra e um trajeto -- quanto mais a distribuicao de "
+        "uma cor esta deslocada para a direita, mais bruscas foram as manobras mais "
+        "fortes registradas naquele grupo."
     )
     dados = validacao[validacao["comportamento"] != "desconhecido"].copy()
     dados["ComportamentoLabel"] = dados["comportamento"].map(COMPORTAMENTO_LABEL)
     ordem = ["Normal", "Agressiva", "Sonolenta"]
     cores = [COMPORTAMENTO_COR["normal"], COMPORTAMENTO_COR["agressiva"], COMPORTAMENTO_COR["sonolenta"]]
 
-    grafico = alt.Chart(dados).mark_boxplot(size=45, outliers=True).encode(
-        x=alt.X("ComportamentoLabel:N", title=None, sort=ordem, axis=alt.Axis(labelAngle=0)),
-        y=alt.Y("magnitude_maxima_ms2:Q", title="Aceleracao de pico do trajeto (m/s^2)"),
+    grafico = alt.Chart(dados).mark_bar(opacity=0.65).encode(
+        x=alt.X("magnitude_maxima_ms2:Q", bin=alt.Bin(maxbins=15), title="Aceleracao de pico do trajeto (m/s^2)"),
+        y=alt.Y("count()", title="Numero de trajetos", stack=None),
         color=alt.Color(
-            "ComportamentoLabel:N", title=None, legend=None,
+            "ComportamentoLabel:N", title="Comportamento",
             scale=alt.Scale(domain=ordem, range=cores),
         ),
+        tooltip=["ComportamentoLabel", "count()"],
     ).properties(height=280)
     st.altair_chart(grafico, width="stretch")
 
@@ -838,16 +839,19 @@ def render_binario_uah(validacao: pd.DataFrame):
     st.caption(
         "Eventos por minuto fica perto de zero para os dois grupos (ver cartoes "
         "acima e aviso na secao anterior) -- a diferenca fica mais visivel olhando a "
-        "aceleracao de pico de cada trajeto."
+        "distribuicao da aceleracao de pico de cada trajeto. Barras sobrepostas (nao "
+        "empilhadas); quanto mais a cor rosa aparece deslocada para a direita, mais "
+        "trajetos de mau comportamento tiveram picos altos."
     )
     cores = [COMPORTAMENTO_BINARIO_COR[o] for o in ordem]
-    grafico = alt.Chart(dados).mark_boxplot(size=50, outliers=True).encode(
-        x=alt.X("ComportamentoBinario:N", title=None, sort=ordem, axis=alt.Axis(labelAngle=0, labelLimit=200)),
-        y=alt.Y("magnitude_maxima_ms2:Q", title="Aceleracao de pico do trajeto (m/s^2)"),
+    grafico = alt.Chart(dados).mark_bar(opacity=0.65).encode(
+        x=alt.X("magnitude_maxima_ms2:Q", bin=alt.Bin(maxbins=15), title="Aceleracao de pico do trajeto (m/s^2)"),
+        y=alt.Y("count()", title="Numero de trajetos", stack=None),
         color=alt.Color(
-            "ComportamentoBinario:N", title=None, legend=None,
+            "ComportamentoBinario:N", title=None,
             scale=alt.Scale(domain=ordem, range=cores),
         ),
+        tooltip=["ComportamentoBinario", "count()"],
     ).properties(height=260)
     st.altair_chart(grafico, width="stretch")
 
