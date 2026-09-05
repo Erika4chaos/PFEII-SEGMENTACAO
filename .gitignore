@@ -5,3 +5,8 @@ __pycache__/
 .ipynb_checkpoints/
 .streamlit/secrets.toml
 *.egg-info/
+
+# UAH-DriveSet original archive (~3.5GB, includes videos not used by this
+# project) -- only the small RAW_ACCELEROMETERS/RAW_GPS/etc. text files
+# extracted under data/raw/uah-driveset/ are tracked.
+data/raw/UAH-DRIVESET-v1.zip

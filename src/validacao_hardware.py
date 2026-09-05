@@ -1,184 +1,249 @@
 """
 validacao_hardware.py
 
-Validates the firmware's acceleration-magnitude threshold logic (~6 m/s^2,
-per MASELLO et al., 2025; BRUHWILER et al., 2022) against a public
-driving-behavior dataset, replacing the now-unavailable UAH-DriveSet.
+Valida a logica de deteccao de eventos do modulo ESP32 (Secao 2.8): o
+limiar de magnitude da aceleracao (~6 m/s^2) e aplicado sobre o
+UAH-DriveSet (ROMERA; BERGASA; ARROYO, 2016) e a taxa de eventos por minuto
+resultante e confrontada, por ANOVA, com o rotulo comportamental conhecido
+de cada trajeto (normal / agressiva / sonolenta).
 
-Source (see Seção 3.3 / Part B.5 of the technical spec):
-  - Ferreira Jr., J.; Carvalho, E.; Ferreira, B. V.; Souza, C. de;
-    Suhara, Y.; Pentland, A.; Pessin, G. (2017). Driver behavior
-    profiling: An investigation with different smartphone sensors and
-    machine learning. PLoS ONE, 12(4), e0174959.
-    Dataset: github.com/jair-jr/driverBehaviorDataset
+Layout de colunas e delimitador conferidos contra o leitor de referencia do
+proprio autor do dataset:
+  https://github.com/Eromera/uah_driveset_reader
+  http://www.robesafe.uah.es/personal/eduardo.romera/uah-driveset/
 
-A single-source dataset was chosen over combining it with a second
-Kaggle/Mendeley source (Yuksel, 2021) after an initial two-source run
-surfaced two problems specific to that combination: (1) the two sources
-turned out to be in different physical units (g vs m/s^2), requiring a
-harmonization step verified only empirically, since neither source's own
-documentation could be trusted at face value; and (2) the Yuksel source's
-"Sudden X" labels appear to be assigned per recording session rather than
-per window (near-flat peak-deviation statistics across ~250 consecutive
-windows under one label), which is a weaker ground truth than Ferreira
-Jr.'s labels — timestamped by researchers watching a reference video of
-the driver deliberately performing each maneuver. Ferreira Jr. alone also
-has the one property the validation actually needs most: a genuine
-"Non-aggressive event" baseline class, enabling real positive/negative
-discrimination rather than only within-"harsh" category comparison.
+RAW_ACCELEROMETERS.txt (espaco como delimitador, sem cabecalho):
+  0 timestamp (s desde o inicio do trajeto)
+  1 ativo_v50 (1 se velocidade > 50 km/h)
+  2-4 acc_x, acc_y, acc_z brutos (Gs)
+  5-7 acc_x_kf, acc_y_kf, acc_z_kf filtrados por Kalman (Gs)
+  8-10 roll, pitch, yaw (graus)
+Por convencao do dataset, Z e Y sao as aceleracoes longitudinal e lateral,
+respectivamente; X carrega componente vertical/gravitacional residual e por
+isso e excluido do calculo da magnitude de manobra -- a mesma logica que o
+firmware aplica ao subtrair a gravidade calibrada antes do limiar (Secao 2.8).
 
-Trade-off accepted explicitly: n=55 windows total (as few as 3 per
-class) is a small-sample feasibility check, not a statistically powered
-validation — report it that way, in the same spirit as the bench
-tests/road tests in the author's own vehicle (Seção 3.3).
+RAW_GPS.txt (espaco como delimitador, sem cabecalho; opcional -- usado apenas
+para enriquecer o resumo por trajeto, a deteccao de eventos independe dele):
+  0 timestamp (s desde o inicio do trajeto)
+  1 velocidade (Km/h)
+  2-3 latitude, longitude
+  4 altitude
+  5-6 precisao vertical/horizontal
+  7 curso (graus)
+  8 var_curso: variacao do curso entre amostras (indicador de ziguezague)
+  9-11 estados internos do dataset (posicao, faixa) -- nao utilizados aqui
 
-Note: this source has NO GPS or speed data (confirmed against the
-dataset repository and the source paper) — only accelerometer, linear
-acceleration, gyroscope, and magnetometer from the recording smartphone.
-The vehicle's speedometer appears only in the reference video used for
-manual labeling, never as a machine-readable field. Speed-linked
-validation (e.g., the "excesso de velocidade" criterion) remains out of
-scope regardless of source choice.
+O rotulo comportamental (normal/agressiva/sonolenta) nao vem em uma coluna:
+esta codificado em algum nivel do nome da pasta do trajeto (ex.:
+"D1/20151111125233-24km-D1-AGGRESSIVE-MOTORWAY/"). Por isso a deteccao e
+feita por busca de palavra-chave no caminho completo, robusta a variacoes
+exatas de nomenclatura entre motoristas/versoes do dataset.
+
+Nota: EVENTS_INERTIAL.txt (eventos ja pre-extraidos pelo algoritmo online do
+proprio dataset) nao e usado aqui de proposito -- o objetivo desta validacao
+e testar a logica de deteccao do FIRMWARE (limiar de magnitude sobre o sinal
+bruto do acelerometro), nao reaproveitar a deteccao de outro algoritmo.
+
+Uso:
+    python src/validacao_hardware.py
+    python src/validacao_hardware.py --dataset-dir data/raw/uah-driveset --limiar 6.0
 """
+
+import argparse
+import re
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from scipy.stats import f_oneway
 
-RAW_PATH = "data/raw/combined_normalized_driver_conduct.csv"
-OUT_PATH = "data/processed/driver_conduct_harmonized.csv"
-METRICS_PATH = "data/processed/driver_conduct_metrics.csv"
-CONFOUND_PATH = "data/processed/driver_conduct_confound.csv"
-SOURCE_NAME = "jair_jr_driverBehaviorDataset_2016"
+G_MS2 = 9.80665  # 1 G em m/s^2
+LIMIAR_PADRAO_MS2 = 6.0
 
-HARSH_THRESHOLD_MPS2 = 6.0  # literature threshold (Masello et al., 2025; Bruhwiler et al., 2022)
+ACC_COLUNAS = [
+    "timestamp", "ativo_v50",
+    "acc_x", "acc_y", "acc_z",
+    "acc_x_kf", "acc_y_kf", "acc_z_kf",
+    "roll", "pitch", "yaw",
+]
 
-# ---------------------------------------------------------------------------
-# Step 1 — Load and restrict to the single chosen source.
-# ---------------------------------------------------------------------------
-df_all = pd.read_csv(RAW_PATH)
-df = df_all[df_all["SourceDataset"] == SOURCE_NAME].copy()
-print(f"=== Step 1: {len(df)} windows loaded from {SOURCE_NAME} "
-      f"(out of {len(df_all)} in the combined raw file) ===")
+GPS_COLUNAS = [
+    "timestamp", "velocidade_kmh", "latitude", "longitude", "altitude",
+    "precisao_vertical", "precisao_horizontal", "curso", "var_curso",
+    "estado_posicao", "estado_lanex", "historico_lanex",
+]
 
-RAW_ACC_COLS = [c for c in df.columns
-                if c.startswith("Acc") and not c.endswith("_z")]
-
-# ---------------------------------------------------------------------------
-# Step 2 — Empirical unit check (still worth doing even for one source —
-# never assume documented units are correct without checking).
-# ---------------------------------------------------------------------------
-acc_var_cols = ["AccVarX", "AccVarY", "AccVarZ"]
-df["_AccVarMag"] = np.sqrt((df[acc_var_cols] ** 2).sum(axis=1))
-df["_AccMagMean_raw"] = np.sqrt(
-    df["AccMeanX"] ** 2 + df["AccMeanY"] ** 2 + df["AccMeanZ"] ** 2
-)
-low_var_thresh = df["_AccVarMag"].quantile(0.10)
-steady_mag = df.loc[df["_AccVarMag"] <= low_var_thresh, "_AccMagMean_raw"].mean()
-print(f"\n=== Step 2: empirical unit check ===")
-print(f"Steady-window |Acc| = {steady_mag:.3f} "
-      f"(~9.8 confirms m/s^2 as documented — no conversion needed)")
-
-# ---------------------------------------------------------------------------
-# Step 3 — Peak *dynamic* acceleration proxy (gravity/baseline-subtracted).
-# The firmware subtracts a calibrated gravity/baseline component before
-# thresholding (Seção 2.8). We only have per-window statistics, not raw
-# per-sample vectors, so the closest available proxy is the peak deviation
-# of Max/Min from the window Mean on each axis (Mean approximates the
-# roughly-constant gravity + steady-driving baseline), combined into a
-# resultant magnitude across axes.
-# ---------------------------------------------------------------------------
-for axis in ["X", "Y", "Z"]:
-    up = (df[f"AccMax{axis}"] - df[f"AccMean{axis}"]).abs()
-    down = (df[f"AccMean{axis}"] - df[f"AccMin{axis}"]).abs()
-    df[f"_PeakDev{axis}"] = np.maximum(up, down)
-
-df["PeakDynamicAccel_mps2"] = np.sqrt(
-    df["_PeakDevX"] ** 2 + df["_PeakDevY"] ** 2 + df["_PeakDevZ"] ** 2
-)
-
-# ---------------------------------------------------------------------------
-# Step 4 — Harmonize labels into the firmware's own event categories.
-# This source's taxonomy is already internally consistent (all seven
-# labels come from one study/protocol), so this is a straight mapping,
-# not a cross-source reconciliation.
-# ---------------------------------------------------------------------------
-LABEL_MAP = {
-    "Aggressive acceleration": ("ACCELERATION", "harsh"),
-    "Aggressive braking": ("BRAKING", "harsh"),
-    "Aggressive left turn": ("TURN", "harsh"),
-    "Aggressive right turn": ("TURN", "harsh"),
-    "Aggressive left lane change": ("LANE_CHANGE", "excluded"),
-    "Aggressive right lane change": ("LANE_CHANGE", "excluded"),
-    "Non-aggressive event": ("NON_AGGRESSIVE", "baseline"),
+PALAVRAS_CHAVE_COMPORTAMENTO = {
+    "aggressive": "agressiva",
+    "drowsy": "sonolenta",
+    "sleepy": "sonolenta",
+    "normal": "normal",
 }
-df["EventCategory"] = df["EventLabel"].map(lambda x: LABEL_MAP[x][0])
-df["ValidationRole"] = df["EventLabel"].map(lambda x: LABEL_MAP[x][1])
 
-print("\n=== Step 4: category counts (by validation role) ===")
-print(df.groupby(["ValidationRole", "EventCategory"]).size())
-print("\nLane-change is excluded from discrimination scoring below — a single "
-      "accelerometer+GPS node without steering data cannot detect a lane "
-      "change; this is an architectural scope limit, not a dropped row.")
+MOTORISTA_RE = re.compile(r"^D\d+$", re.IGNORECASE)
 
-# ---------------------------------------------------------------------------
-# Step 5 — Apply the ~6 m/s^2 threshold and score discrimination.
-# Ground truth: 'harsh' maneuvers (accel/brake/turn) = positive;
-# 'Non-aggressive event' = negative.
-# ---------------------------------------------------------------------------
-evalset = df[df["ValidationRole"] != "excluded"].copy()
-evalset["y_true"] = (evalset["ValidationRole"] == "harsh").astype(int)
-evalset["y_pred"] = (evalset["PeakDynamicAccel_mps2"] > HARSH_THRESHOLD_MPS2).astype(int)
 
-def confusion(sub):
-    tp = ((sub.y_true == 1) & (sub.y_pred == 1)).sum()
-    fn = ((sub.y_true == 1) & (sub.y_pred == 0)).sum()
-    tn = ((sub.y_true == 0) & (sub.y_pred == 0)).sum()
-    fp = ((sub.y_true == 0) & (sub.y_pred == 1)).sum()
-    precision = tp / (tp + fp) if (tp + fp) else float("nan")
-    recall = tp / (tp + fn) if (tp + fn) else float("nan")
-    f1 = 2 * precision * recall / (precision + recall) if (precision + recall) else float("nan")
-    return dict(n=len(sub), tp=tp, fn=fn, tn=tn, fp=fp, precision=precision, recall=recall, f1=f1)
+def detectar_comportamento(caminho_trajeto: Path) -> str:
+    caminho_str = str(caminho_trajeto).lower()
+    for chave, rotulo in PALAVRAS_CHAVE_COMPORTAMENTO.items():
+        if chave in caminho_str:
+            return rotulo
+    return "desconhecido"
 
-print(f"\n=== Step 5: threshold = {HARSH_THRESHOLD_MPS2} m/s^2 on PeakDynamicAccel ===")
-print("n =", len(evalset), "— small-sample feasibility check, report accordingly")
-print(confusion(evalset))
 
-metrics_rows = [dict(categoria="todas", **confusion(evalset))]
+def extrair_motorista(caminho_trajeto: Path) -> str:
+    """Identifica o motorista pelo segmento de caminho no padrao 'D<numero>'
+    (ex.: D1, D2), usado pelo UAH-DriveSet para agrupar os trajetos de um
+    mesmo condutor. Usado apenas para exibicao no dashboard."""
+    for parte in caminho_trajeto.parts:
+        if MOTORISTA_RE.match(parte):
+            return parte.upper()
+    return "desconhecido"
 
-print("\n-- Per harmonized category (recall within 'harsh' classes; n as low as 6, "
-      "read as directional, not statistically powered) --")
-for cat, sub in evalset[evalset.ValidationRole == "harsh"].groupby("EventCategory"):
-    recall = (sub.y_pred == 1).mean()
-    print(f"  {cat}: n={len(sub)}  recall={recall:.3f}")
-    metrics_rows.append(dict(categoria=cat, n=len(sub), recall=recall))
 
-pd.DataFrame(metrics_rows).to_csv(METRICS_PATH, index=False)
-print(f"\nMetrics table written to {METRICS_PATH}.")
+def carregar_acelerometro(caminho_arquivo: Path) -> pd.DataFrame:
+    return pd.read_csv(caminho_arquivo, sep=r"\s+", header=None, names=ACC_COLUNAS)
 
-# ---------------------------------------------------------------------------
-# Step 5b — Driver/session (GroupID) confound: record, per harmonized
-# category, which recording session(s) it comes from. Persisted (not just
-# printed) so the dashboard can show the confound with real counts instead
-# of a static caption — see Part B.5: "not every GroupID session contains
-# every event category ... do not present per-driver conclusions".
-# ---------------------------------------------------------------------------
-confound = df.groupby(["EventCategory", "GroupID"]).size().reset_index(name="n")
-confound["n_sessions_com_categoria"] = confound.groupby("EventCategory")["GroupID"].transform("nunique")
-confound.to_csv(CONFOUND_PATH, index=False)
-print(f"\n-- Per driver/session (GroupID) — descriptive only, not enough n for per-group metrics --")
-print(df.groupby("GroupID")["EventCategory"].value_counts())
-print(f"Confound table written to {CONFOUND_PATH}.")
 
-# ---------------------------------------------------------------------------
-# Step 6 — Persist the harmonized single-source dataset.
-# ---------------------------------------------------------------------------
-keep_cols = (
-    ["SourceDataset", "GroupID", "EventLabel", "EventCategory", "ValidationRole",
-     "WindowIndex"]
-    + RAW_ACC_COLS
-    + ["PeakDynamicAccel_mps2", "_AccMagMean_raw"]
-)
-out = df[keep_cols].rename(columns={"_AccMagMean_raw": "AccMagMean_mps2"})
-out["HarshPredicted_6mps2"] = (out["PeakDynamicAccel_mps2"] > HARSH_THRESHOLD_MPS2).astype(int)
-out.to_csv(OUT_PATH, index=False)
-print(f"\nHarmonized dataset written to {OUT_PATH} ({len(out)} rows, {len(out.columns)} columns).")
+def carregar_gps(caminho_arquivo: Path) -> pd.DataFrame:
+    return pd.read_csv(caminho_arquivo, sep=r"\s+", header=None, names=GPS_COLUNAS)
+
+
+def resumir_gps(df_gps: pd.DataFrame) -> dict:
+    """Velocidade e variacao de curso (ziguezague) agregadas do trajeto,
+    usadas apenas como contexto adicional -- nao alimentam a deteccao de
+    eventos do ESP32, que depende somente do acelerometro."""
+    return {
+        "velocidade_media_kmh": df_gps["velocidade_kmh"].mean(),
+        "velocidade_maxima_kmh": df_gps["velocidade_kmh"].max(),
+        "var_curso_media_abs": df_gps["var_curso"].abs().mean(),
+    }
+
+
+GPS_AUSENTE = {
+    "velocidade_media_kmh": np.nan,
+    "velocidade_maxima_kmh": np.nan,
+    "var_curso_media_abs": np.nan,
+}
+
+
+def calcular_magnitude_ms2(df_acc: pd.DataFrame) -> pd.Series:
+    magnitude_g = np.sqrt(df_acc["acc_y_kf"] ** 2 + df_acc["acc_z_kf"] ** 2)
+    return magnitude_g * G_MS2
+
+
+def detectar_eventos(df_acc: pd.DataFrame, limiar_ms2: float = LIMIAR_PADRAO_MS2) -> pd.DataFrame:
+    df = df_acc.copy()
+    df["magnitude_ms2"] = calcular_magnitude_ms2(df)
+    dt = df["timestamp"].diff().replace(0, np.nan)
+    df["jerk_ms3"] = df["magnitude_ms2"].diff() / dt
+    df["evento"] = df["magnitude_ms2"] > limiar_ms2
+    return df
+
+
+def listar_trajetos(raiz: Path) -> list:
+    return sorted({p.parent for p in raiz.rglob("RAW_ACCELEROMETERS.txt")})
+
+
+def resumir_trajeto(pasta_trajeto: Path, limiar_ms2: float = LIMIAR_PADRAO_MS2) -> dict:
+    df_acc = carregar_acelerometro(pasta_trajeto / "RAW_ACCELEROMETERS.txt")
+    df_acc = detectar_eventos(df_acc, limiar_ms2)
+
+    duracao_min = (df_acc["timestamp"].max() - df_acc["timestamp"].min()) / 60.0
+    n_eventos = int(df_acc["evento"].sum())
+
+    arquivo_gps = pasta_trajeto / "RAW_GPS.txt"
+    if arquivo_gps.exists():
+        gps_stats = resumir_gps(carregar_gps(arquivo_gps))
+    else:
+        gps_stats = GPS_AUSENTE
+
+    resumo = {
+        "fonte": "UAH-DriveSet (ROMERA; BERGASA; ARROYO, 2016)",
+        "trajeto": pasta_trajeto.name,
+        "motorista": extrair_motorista(pasta_trajeto),
+        "comportamento": detectar_comportamento(pasta_trajeto),
+        "duracao_min": duracao_min,
+        "n_amostras": len(df_acc),
+        "n_eventos": n_eventos,
+        "eventos_por_min": n_eventos / duracao_min if duracao_min > 0 else np.nan,
+        "magnitude_media_ms2": df_acc["magnitude_ms2"].mean(),
+        "magnitude_maxima_ms2": df_acc["magnitude_ms2"].max(),
+    }
+    resumo.update(gps_stats)
+    return resumo
+
+
+def processar_dataset(raiz: Path, limiar_ms2: float = LIMIAR_PADRAO_MS2) -> pd.DataFrame:
+    trajetos = listar_trajetos(raiz)
+    return pd.DataFrame(resumir_trajeto(p, limiar_ms2) for p in trajetos)
+
+
+def validar_discriminacao(df_resumo: pd.DataFrame, coluna: str):
+    """ANOVA one-way comparando a coluna informada entre os rotulos
+    comportamentais conhecidos (normal/agressiva/sonolenta)."""
+    conhecidos = df_resumo[df_resumo["comportamento"] != "desconhecido"]
+    grupos = [g[coluna].dropna().to_numpy() for _, g in conhecidos.groupby("comportamento")]
+    grupos = [g for g in grupos if len(g) > 0]
+    if len(grupos) < 2:
+        return None
+    return f_oneway(*grupos)
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Valida o limiar de deteccao de eventos do firmware contra o UAH-DriveSet."
+    )
+    parser.add_argument("--dataset-dir", type=str, default=None)
+    parser.add_argument("--limiar", type=float, default=LIMIAR_PADRAO_MS2, help="limiar de magnitude em m/s^2")
+    parser.add_argument("--out-dir", type=str, default=None)
+    args = parser.parse_args()
+
+    raiz_projeto = Path(__file__).resolve().parent.parent
+    dataset_dir = Path(args.dataset_dir) if args.dataset_dir else raiz_projeto / "data" / "raw" / "uah-driveset"
+    saida_dir = Path(args.out_dir) if args.out_dir else raiz_projeto / "data" / "processed"
+
+    if not dataset_dir.exists() or not listar_trajetos(dataset_dir):
+        print(
+            f"Nenhum trajeto (RAW_ACCELEROMETERS.txt) encontrado em {dataset_dir}.\n"
+            "Baixe o UAH-DriveSet (ROMERA; BERGASA; ARROYO, 2016) em:\n"
+            "  http://www.robesafe.uah.es/personal/eduardo.romera/uah-driveset/\n"
+            "e extraia de forma que cada pasta de trajeto contenha RAW_ACCELEROMETERS.txt "
+            "(ex.: data/raw/uah-driveset/UAH-DRIVESET-v1/D1/<trajeto>/RAW_ACCELEROMETERS.txt)."
+        )
+        return
+
+    saida_dir.mkdir(parents=True, exist_ok=True)
+
+    df_resumo = processar_dataset(dataset_dir, args.limiar)
+
+    print(f"Limiar de magnitude adotado: {args.limiar} m/s^2\n")
+    print(f"{len(df_resumo)} trajetos processados de {dataset_dir}\n")
+    print("Resumo por trajeto:")
+    print(df_resumo.to_string(index=False))
+
+    print("\nTaxa de eventos por minuto, agregada por comportamento conhecido:")
+    print(df_resumo.groupby("comportamento")["eventos_por_min"].agg(["mean", "median", "std", "count"]))
+
+    colunas_anova = ["eventos_por_min"]
+    if df_resumo["velocidade_media_kmh"].notna().any():
+        colunas_anova += ["velocidade_media_kmh", "var_curso_media_abs"]
+
+    for coluna in colunas_anova:
+        resultado_anova = validar_discriminacao(df_resumo, coluna)
+        if resultado_anova is not None:
+            print(
+                f"\nANOVA one-way ({coluna} ~ comportamento): "
+                f"F={resultado_anova.statistic:.4f}, p={resultado_anova.pvalue:.6f}"
+            )
+        else:
+            print(f"\nRotulos comportamentais insuficientes para ANOVA em {coluna} (minimo de 2 grupos conhecidos).")
+
+    caminho_saida = saida_dir / "validacao_hardware_uah_driveset.csv"
+    df_resumo.to_csv(caminho_saida, index=False)
+    print(f"\nResumo por trajeto salvo em: {caminho_saida}")
+
+
+if __name__ == "__main__":
+    main()
