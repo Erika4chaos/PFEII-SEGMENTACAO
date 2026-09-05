@@ -1,0 +1,4 @@
+verificacao,valor_esperado,valor_observado,status
+taxa de amostragem do acelerometro (~10 Hz documentado),~10 Hz,9.90 Hz,ok
+magnitude dinamica maxima observada (teto fisico plausivel p/ carro de passeio),< 4 G,0.62 G,ok
+filtro de Kalman reduz ruido em relacao ao sinal bruto (% de trajetos),100%,100%,ok
