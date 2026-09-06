@@ -100,7 +100,12 @@ import pandas as pd
 from scipy.stats import f_oneway
 
 G_MS2 = 9.80665  # 1 G em m/s^2
-LIMIAR_PADRAO_MS2 = 6.0
+# Limiar de magnitude do firmware (Secao 2.8), em m/s^2. E a UNICA definicao
+# desse valor no projeto: o dashboard importa esta constante em vez de repetir
+# o numero, e main() ainda aceita --limiar para varrer outros valores sem
+# editar codigo. 6,0 m/s^2 = 0,61 G -- ver a Figura 1 da aba de validacao para
+# onde isso cai na regua da literatura.
+THRESH_MAG_MS2 = 6.0
 
 ACC_COLUNAS = [
     "timestamp", "ativo_v50",
@@ -183,7 +188,7 @@ def calcular_magnitude_ms2(df_acc: pd.DataFrame) -> pd.Series:
     return magnitude_g * G_MS2
 
 
-def detectar_eventos(df_acc: pd.DataFrame, limiar_ms2: float = LIMIAR_PADRAO_MS2) -> pd.DataFrame:
+def detectar_eventos(df_acc: pd.DataFrame, limiar_ms2: float = THRESH_MAG_MS2) -> pd.DataFrame:
     df = df_acc.copy()
     df["magnitude_ms2"] = calcular_magnitude_ms2(df)
     dt = df["timestamp"].diff().replace(0, np.nan)
@@ -196,7 +201,7 @@ def listar_trajetos(raiz: Path) -> list:
     return sorted({p.parent for p in raiz.rglob("RAW_ACCELEROMETERS.txt")})
 
 
-def resumir_trajeto(pasta_trajeto: Path, limiar_ms2: float = LIMIAR_PADRAO_MS2) -> dict:
+def resumir_trajeto(pasta_trajeto: Path, limiar_ms2: float = THRESH_MAG_MS2) -> dict:
     df_acc = carregar_acelerometro(pasta_trajeto / "RAW_ACCELEROMETERS.txt")
     df_acc = detectar_eventos(df_acc, limiar_ms2)
 
@@ -226,7 +231,7 @@ def resumir_trajeto(pasta_trajeto: Path, limiar_ms2: float = LIMIAR_PADRAO_MS2) 
     return resumo
 
 
-def processar_dataset(raiz: Path, limiar_ms2: float = LIMIAR_PADRAO_MS2) -> pd.DataFrame:
+def processar_dataset(raiz: Path, limiar_ms2: float = THRESH_MAG_MS2) -> pd.DataFrame:
     trajetos = listar_trajetos(raiz)
     return pd.DataFrame(resumir_trajeto(p, limiar_ms2) for p in trajetos)
 
@@ -360,6 +365,45 @@ def avaliar_limiares(magnitudes: pd.DataFrame, limiares: list) -> pd.DataFrame:
     return pd.DataFrame(linhas)
 
 
+# Recorte por trajeto consumido pela aba "Validacao de Hardware" do dashboard.
+# E o MESMO df_resumo de processar_dataset(), apenas renomeado: nenhuma coluna
+# nova e derivada aqui, para que o dashboard nao possa divergir do pipeline.
+COLUNAS_TRAJETO = ["trajeto_id", "motorista", "estilo", "via",
+                   "duracao_min", "pico_ms2", "eventos", "eventos_min"]
+
+_RENOMEIO_TRAJETO = {
+    "trajeto": "trajeto_id",
+    "comportamento": "estilo",
+    "tipo_via": "via",
+    "magnitude_maxima_ms2": "pico_ms2",
+    "n_eventos": "eventos",
+    "eventos_por_min": "eventos_min",
+}
+_VIA_NORMALIZADA = {"Rodovia": "rodovia", "Via secundaria": "secundaria"}
+
+
+def montar_trajetos(df_resumo: pd.DataFrame) -> pd.DataFrame:
+    """Renomeia o resumo por trajeto para o contrato do dashboard.
+
+    Trajetos com rotulo "desconhecido" ficam de fora: a aba inteira compara os
+    tres rotulos comportamentais do dataset, e um quarto grupo sem rotulo nao
+    entra em nenhuma das figuras. O tipo de via e checado em vez de normalizado
+    no escuro -- se o dataset trouxer uma via nova, o schema declarado no
+    dashboard deixaria de valer em silencio."""
+    d = df_resumo.rename(columns=_RENOMEIO_TRAJETO)
+    d = d[d["estilo"].isin(["normal", "agressiva", "sonolenta"])].copy()
+
+    vias_desconhecidas = sorted(set(d["via"]) - set(_VIA_NORMALIZADA))
+    if vias_desconhecidas:
+        raise ValueError(
+            f"Tipo de via fora do contrato do dashboard: {vias_desconhecidas}. "
+            f"Esperado apenas {sorted(_VIA_NORMALIZADA)}. Atualize _VIA_NORMALIZADA "
+            "e o schema em dashboard/charts_validacao.py juntos."
+        )
+    d["via"] = d["via"].map(_VIA_NORMALIZADA)
+    return d[COLUNAS_TRAJETO].reset_index(drop=True)
+
+
 def calcular_confundimento(df_resumo: pd.DataFrame) -> pd.DataFrame:
     """Contagem de trajetos por motorista x comportamento x tipo de via --
     documenta, com numeros, o quanto esses tres fatores estao cruzados
@@ -389,7 +433,7 @@ def main():
         description="Valida o limiar de deteccao de eventos do firmware contra o UAH-DriveSet."
     )
     parser.add_argument("--dataset-dir", type=str, default=None)
-    parser.add_argument("--limiar", type=float, default=LIMIAR_PADRAO_MS2, help="limiar de magnitude em m/s^2")
+    parser.add_argument("--limiar", type=float, default=THRESH_MAG_MS2, help="limiar de magnitude em m/s^2")
     parser.add_argument("--out-dir", type=str, default=None)
     args = parser.parse_args()
 
@@ -478,6 +522,10 @@ def main():
     caminho_saida = saida_dir / "validacao_hardware_uah_driveset.csv"
     df_resumo.to_csv(caminho_saida, index=False)
     print(f"\nResumo por trajeto salvo em: {caminho_saida}")
+
+    caminho_trajetos = saida_dir / "uah_trips.csv"
+    montar_trajetos(df_resumo).to_csv(caminho_trajetos, index=False)
+    print(f"Trajetos (contrato do dashboard) salvos em: {caminho_trajetos}")
 
 
 if __name__ == "__main__":
