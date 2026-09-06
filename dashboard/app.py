@@ -41,14 +41,17 @@ NOME_PERFIL = {
     3: "Perfil 3 - Cotacao em Referral ou Conversao Tardia",
 }
 
-# Paleta categorica (magenta/azul/verde) validada com scripts/validate_palette.py
-# da skill dataviz para 3 series em grafico de dispersao (checagem --pairs all,
-# light e dark): todos os checks passam, com WARN de contraste no slot magenta/
-# verde mitigado pela legenda + tooltip + tabela de perfis ja presentes na pagina.
+# Paleta categorica (roxo/azul/verde) validada com scripts/validate_palette.py
+# da skill dataviz para 3 series em grafico de dispersao (checagem --pairs all):
+# todos os checks passam, pior par #2a78d6 x #8e2f9e com dE 9,6 sob deuteranopia
+# e 20,8 na visao normal. O roxo substituiu o rosa #e87ba4 anterior, que passava
+# na separacao mas reprovava o contraste contra o fundo claro (2,62:1). Roxo mais
+# claro nao serve: qualquer violeta que puxe para o azul cai para dE 4-7 contra o
+# azul do Perfil 2 -- foi por isso que este tom puxa para o magenta.
 # Cor atribuida por PERFIL (numero de negocio), nao pelo indice arbitrario que o
 # K-Means da ao cluster, para que a identidade visual nao mude entre execucoes.
-CORES_PERFIL = {1: "#e87ba4", 2: "#2a78d6", 3: "#008300"}
-COR_LINHA_DESTAQUE = "#c2185b"
+CORES_PERFIL = {1: "#8e2f9e", 2: "#2a78d6", 3: "#008300"}
+COR_LINHA_DESTAQUE = "#6d3bc4"
 
 # Citacao academica da fonte de validacao de hardware (Part B.5 do escopo
 # tecnico). O UAH-DriveSet e a fonte prevista no plano original; um
@@ -186,8 +189,11 @@ def aplicar_estilo():
         <style>
         :root {
             --navy: #44355b; --navy2: #5a4a75; --navy3: #2e2440;
-            --accent: #c97b9e; --accent-soft: #f6e6ee;
-            --bg: #f6f4f9; --card: #ffffff;
+            --accent: #7b3fbf; --accent-soft: #ede4f9;
+            /* Violeta claro para uso SOBRE a barra lateral escura: o --accent
+               e escuro demais contra o roxo do painel e some. */
+            --accent-claro: #d9c2f7;
+            --bg: #f7f4fc; --card: #ffffff;
             --text: #44355b; --muted: #65596f; --line: #e3dcea;
         }
         [data-testid="stAppViewContainer"], [data-testid="stMain"] {
@@ -251,7 +257,7 @@ def aplicar_estilo():
             color: #cfc4dc;
             margin-top: 12px;
         }
-        .side-badge b { color: var(--accent); }
+        .side-badge b { color: var(--accent-claro); }
 
         [data-testid="stVerticalBlockBorderWrapper"] {
             border-color: var(--line) !important;
@@ -261,7 +267,7 @@ def aplicar_estilo():
         .pill-badge {
             display: inline-block;
             background: var(--accent-soft);
-            color: #9d5577;
+            color: #6a3a96;
             font-size: 12px;
             font-weight: 600;
             padding: 5px 12px;
@@ -318,7 +324,7 @@ NAV_OPCOES = ["Segmentacao", "Validacao de Hardware", "Coligacao Conceitual"]
 def render_sidebar() -> str:
     with st.sidebar:
         st.markdown(
-            '<h2 style="margin-top:0;">Dashboard de <span style="color:#e87ba4;">Risco</span></h2>'
+            '<h2 style="margin-top:0;">Dashboard de <span style="color:#b07be0;">Risco</span></h2>'
             '<div style="font-size:12px;margin-bottom:14px;">RCT Transportador</div>',
             unsafe_allow_html=True,
         )
@@ -683,7 +689,7 @@ def render_view_coligacao(original: pd.DataFrame, mapa_perfil: dict, validacao: 
             node [shape=box, style="rounded,filled", fontname="Helvetica", fontsize=11, margin=0.18];
             edge [fontname="Helvetica", fontsize=9, color="#8a7f97", fontcolor="#65596f"];
 
-            perfil [label="Perfil historico\n(cotacao/apolice)\nclassificado Perfil 1/2/3", fillcolor="#e87ba4", fontcolor="white"];
+            perfil [label="Perfil historico\n(cotacao/apolice)\nclassificado Perfil 1/2/3", fillcolor="#8e2f9e", fontcolor="white"];
             token [label="Token pseudonimo\nassociado a frota/veiculo\n(nunca o numero da apolice)", fillcolor="#f6e6ee", fontcolor="#44355b"];
             dispositivo [label="Dispositivo ESP32\nna frota\n(so ve o token)", fillcolor="#2a78d6", fontcolor="white"];
             ingestao [label="Ingestao de telemetria\nrecebe token + evento\nresumido (nunca GPS bruto)", fillcolor="#f6e6ee", fontcolor="#44355b"];
@@ -695,7 +701,7 @@ def render_view_coligacao(original: pd.DataFrame, mapa_perfil: dict, validacao: 
             dispositivo -> ingestao [label="  eventos + token  "];
             ingestao -> reassociacao [label="  lookup do token  "];
             reassociacao -> classificacao [label="  feedback  "];
-            classificacao -> perfil [label="  atualiza o perfil  ", style=dashed, color="#c2185b", fontcolor="#c2185b"];
+            classificacao -> perfil [label="  atualiza o perfil  ", style=dashed, color="#6d3bc4", fontcolor="#6d3bc4"];
         }
         """
     )

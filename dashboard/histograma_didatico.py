@@ -32,8 +32,8 @@ import altair as alt
 import numpy as np
 import pandas as pd
 
-COR_PADRAO = "#e87ba4"
-COR_MODA = "#c2185b"
+COR_PADRAO = "#8e2f9e"
+COR_MODA = "#6d3bc4"
 COR_LIMIAR = "#44355b"
 
 # Base da escala logaritmica. log(0) nao existe, entao em escala log a barra
