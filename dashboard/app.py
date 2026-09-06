@@ -788,48 +788,121 @@ def _contagem_com_evento(dados: pd.DataFrame, coluna_grupo: str, ordem: list) ->
     )
 
 
+LARGURA_PILHA_MS2 = 0.25   # largura da faixa em que trajetos proximos se empilham
+
+
+def _dot_plot_empilhado(dados: pd.DataFrame, coluna_grupo: str, ordem: list,
+                         cores: list, altura_painel: int = 88) -> alt.Chart:
+    """Dot plot com empilhamento DETERMINISTICO: trajetos com pico proximo sao
+    agrupados numa faixa e empilhados verticalmente, em vez de deslocados por
+    jitter aleatorio. Com jitter a posicao vertical nao significa nada, os
+    pontos ainda se sobrepoem e o grafico muda a cada execucao; empilhados, a
+    altura da coluna passa a ser a propria contagem daquele intervalo."""
+    d = dados.copy()
+    d["_faixa"] = (d["magnitude_maxima_ms2"] / LARGURA_PILHA_MS2).round().astype(int)
+    d["_pilha"] = d.groupby([coluna_grupo, "_faixa"]).cumcount()
+    d["_x"] = d["_faixa"] * LARGURA_PILHA_MS2
+    altura_max = int(d["_pilha"].max()) + 1
+
+    pontos = alt.Chart(d).mark_circle(size=95, opacity=0.9).encode(
+        x=alt.X("_x:Q", title="Aceleracao de pico do trajeto (m/s²)",
+                scale=alt.Scale(domain=[0.5, 6.4], nice=False)),
+        y=alt.Y("_pilha:Q", title=None, axis=None,
+                scale=alt.Scale(domain=[-0.6, altura_max])),
+        color=alt.Color(f"{coluna_grupo}:N", legend=None,
+                        scale=alt.Scale(domain=ordem, range=cores)),
+        tooltip=["motorista", "trajeto", coluna_grupo, "tipo_via",
+                 alt.Tooltip("magnitude_maxima_ms2:Q", title="Pico (m/s²)", format=".2f"),
+                 alt.Tooltip("n_eventos:Q", title="Eventos detectados")],
+    )
+    mediana = alt.Chart(d).mark_rule(strokeWidth=2.5, color=COR_LINHA_DESTAQUE).encode(
+        x=alt.X("median(magnitude_maxima_ms2):Q"))
+    limiar = alt.Chart(pd.DataFrame({"v": [6.0]})).mark_rule(
+        strokeDash=[6, 4], strokeWidth=2, color="#44355b").encode(x=alt.X("v:Q"))
+
+    return (pontos + mediana + limiar).properties(height=altura_painel).facet(
+        row=alt.Row(f"{coluna_grupo}:N", sort=ordem, title=None,
+                    header=alt.Header(labelAngle=0, labelAlign="left", labelFontSize=12,
+                                      labelFontWeight="bold", labelColor="#44355b")),
+    ).resolve_scale(y="independent")
+
+
 def render_grafico_eventos_comportamento(validacao: pd.DataFrame):
     st.markdown("##### Aceleracao de pico de cada trajeto, por rotulo comportamental")
     st.caption(
         "**Um ponto por trajeto** (nao um histograma): sao apenas 40 trajetos no "
         "dataset inteiro, e com esse n um histograma agruparia 2 ou 3 trajetos por "
-        "classe e viraria ruido. O dot plot mostra cada trajeto individualmente, que "
-        "e o que esse tamanho de amostra sustenta. Esta e a metrica que discrimina "
-        "significativamente entre os tres grupos (ver ANOVA acima)."
+        "classe e viraria ruido. Trajetos de pico parecido ficam empilhados na "
+        "vertical, entao a altura de cada coluna e a contagem daquele intervalo."
     )
     dados = validacao[validacao["comportamento"] != "desconhecido"].copy()
     dados["ComportamentoLabel"] = dados["comportamento"].map(COMPORTAMENTO_LABEL)
     ordem = ["Normal", "Agressiva", "Sonolenta"]
-    cores = [COMPORTAMENTO_COR["normal"], COMPORTAMENTO_COR["agressiva"], COMPORTAMENTO_COR["sonolenta"]]
+    cores = [COMPORTAMENTO_COR["normal"], COMPORTAMENTO_COR["agressiva"],
+             COMPORTAMENTO_COR["sonolenta"]]
 
-    base = alt.Chart(dados).transform_calculate(jitter="random()")
-    pontos = base.mark_circle(size=110, opacity=0.8).encode(
-        y=alt.Y("ComportamentoLabel:N", title=None, sort=ordem, axis=alt.Axis(labelAngle=0)),
-        yOffset=alt.YOffset("jitter:Q", scale=alt.Scale(domain=[-1.5, 2.5])),
-        x=alt.X("magnitude_maxima_ms2:Q", title="Aceleracao de pico do trajeto (m/s²)",
-                scale=alt.Scale(domain=[0, 7], nice=False)),
-        color=alt.Color("ComportamentoLabel:N", title=None, legend=None,
+    col_dots, col_slope = st.columns([1.5, 1])
+    with col_dots:
+        st.altair_chart(_dot_plot_empilhado(dados, "ComportamentoLabel", ordem, cores))
+        st.caption(
+            "Linha vertical rosa = mediana do grupo. Tracejada = limiar de 6 m/s²: "
+            "nenhum trajeto normal ou agressivo chega la."
+        )
+    with col_slope:
+        render_slope_motorista(dados, ordem, cores)
+
+    render_contagem_limiar(dados, "ComportamentoLabel", ordem)
+
+
+def render_slope_motorista(dados: pd.DataFrame, ordem: list, cores: list):
+    """Mesmo motorista ligado nos tres estilos. O desenho experimental do
+    UAH-DriveSet e de medidas repetidas -- os mesmos 6 condutores dirigiram nos
+    tres estilos -- e o dot plot ao lado descarta essa informacao ao tratar os
+    40 trajetos como independentes. Aqui cada linha e um motorista, o que
+    responde diretamente a objecao 'nao e so que alguns motoristas dirigem mais
+    forte que outros?': se a subida acontece dentro de cada condutor, a
+    diferenca nao vem da composicao dos grupos."""
+    st.markdown("**O mesmo motorista, nos tres estilos**")
+    por_motorista = dados.groupby(["motorista", "ComportamentoLabel"], as_index=False).agg(
+        pico=("magnitude_maxima_ms2", "mean"), n=("trajeto", "size"))
+
+    base = alt.Chart(por_motorista).encode(
+        x=alt.X("ComportamentoLabel:N", sort=ordem, title=None,
+                axis=alt.Axis(labelAngle=0, labelFontSize=11)),
+        y=alt.Y("pico:Q", title="Pico medio dos trajetos (m/s²)",
+                scale=alt.Scale(domain=[0, 6.4])),
+        detail=alt.Detail("motorista:N"),
+    )
+    linhas = base.mark_line(strokeWidth=2, color="#8a7f97", opacity=0.75)
+    marcas = base.mark_point(size=85, filled=True).encode(
+        color=alt.Color("ComportamentoLabel:N", legend=None,
                         scale=alt.Scale(domain=ordem, range=cores)),
-        tooltip=["motorista", "trajeto", "ComportamentoLabel", "tipo_via",
-                 alt.Tooltip("magnitude_maxima_ms2:Q", title="Pico (m/s²)", format=".2f"),
-                 alt.Tooltip("n_eventos:Q", title="Eventos detectados")],
+        tooltip=["motorista", "ComportamentoLabel",
+                 alt.Tooltip("pico:Q", title="Pico medio (m/s²)", format=".2f"),
+                 alt.Tooltip("n:Q", title="trajetos")],
     )
-    medianas = alt.Chart(dados).mark_tick(
-        thickness=3, size=34, color=COR_LINHA_DESTAQUE, opacity=0.9,
-    ).encode(
-        y=alt.Y("ComportamentoLabel:N", sort=ordem),
-        x=alt.X("median(magnitude_maxima_ms2):Q"),
-    )
+    rotulos = alt.Chart(por_motorista[por_motorista["ComportamentoLabel"] == ordem[-1]]).mark_text(
+        align="left", dx=10, fontSize=10, color="#65596f",
+    ).encode(x=alt.X("ComportamentoLabel:N", sort=ordem), y=alt.Y("pico:Q"),
+             text=alt.Text("motorista:N"))
     limiar = alt.Chart(pd.DataFrame({"v": [6.0]})).mark_rule(
-        strokeDash=[6, 4], strokeWidth=2, color="#44355b",
-    ).encode(x=alt.X("v:Q"))
+        strokeDash=[6, 4], strokeWidth=2, color="#44355b").encode(y=alt.Y("v:Q"))
 
-    st.altair_chart((pontos + medianas + limiar).properties(height=210), width="stretch")
+    st.altair_chart((linhas + marcas + rotulos + limiar).properties(height=300),
+                    width="stretch")
+
+    tabela = por_motorista.pivot(index="motorista", columns="ComportamentoLabel", values="pico")
+    subiram = int((tabela["Agressiva"] > tabela["Normal"]).sum())
     st.caption(
-        "Traco vertical escuro = mediana do grupo. Linha tracejada = limiar de 6 m/s² "
-        "do firmware: nenhum trajeto normal ou agressivo alcanca esse valor de pico."
+        f"**{subiram} de {len(tabela)} motoristas** tem pico maior na conducao "
+        f"agressiva do que na normal — a diferenca se sustenta dentro de cada "
+        f"condutor, nao vem de uns dirigirem mais forte que outros. Em sonolenta o "
+        f"padrao ja nao e consistente. Cada ponto e a media dos trajetos daquele "
+        f"motorista naquele estilo (2 a 3 trajetos; D6 tem 1 em agressiva)."
     )
 
+
+def render_contagem_limiar(dados: pd.DataFrame, coluna_grupo: str, ordem: list):
     st.markdown("###### Trajetos que ultrapassaram o limiar do firmware (~6 m/s^2)")
     st.caption(
         "Como o limiar e raramente cruzado (ver aviso acima), a contagem direta de "
@@ -837,8 +910,8 @@ def render_grafico_eventos_comportamento(validacao: pd.DataFrame):
         "taxa de eventos por minuto, que fica perto de zero na quase totalidade dos "
         "casos."
     )
-    resumo = _contagem_com_evento(dados, "ComportamentoLabel", ordem)
-    colunas = st.columns(3)
+    resumo = _contagem_com_evento(dados, coluna_grupo, ordem)
+    colunas = st.columns(len(ordem))
     for coluna, rotulo in zip(colunas, ordem):
         linha = resumo.loc[rotulo]
         with coluna:
@@ -989,28 +1062,13 @@ def render_binario_uah(validacao: pd.DataFrame):
         "diferenca aparece na aceleracao de pico."
     )
     cores = [COMPORTAMENTO_BINARIO_COR[o] for o in ordem]
-    base = alt.Chart(dados).transform_calculate(jitter="random()")
-    pontos = base.mark_circle(size=110, opacity=0.8).encode(
-        y=alt.Y("ComportamentoBinario:N", title=None, sort=ordem,
-                axis=alt.Axis(labelAngle=0, labelLimit=200)),
-        yOffset=alt.YOffset("jitter:Q", scale=alt.Scale(domain=[-1.5, 2.5])),
-        x=alt.X("magnitude_maxima_ms2:Q", title="Aceleracao de pico do trajeto (m/s²)",
-                scale=alt.Scale(domain=[0, 7], nice=False)),
-        color=alt.Color("ComportamentoBinario:N", title=None, legend=None,
-                        scale=alt.Scale(domain=ordem, range=cores)),
-        tooltip=["motorista", "trajeto", "ComportamentoBinario", "tipo_via",
-                 alt.Tooltip("magnitude_maxima_ms2:Q", title="Pico (m/s²)", format=".2f")],
+    st.altair_chart(
+        _dot_plot_empilhado(dados, "ComportamentoBinario", ordem, cores, altura_painel=105)
     )
-    medianas = alt.Chart(dados).mark_tick(
-        thickness=3, size=40, color=COR_LINHA_DESTAQUE, opacity=0.9,
-    ).encode(
-        y=alt.Y("ComportamentoBinario:N", sort=ordem),
-        x=alt.X("median(magnitude_maxima_ms2):Q"),
+    st.caption(
+        "Trajetos de pico parecido ficam empilhados; linha rosa = mediana do grupo, "
+        "tracejada = limiar de 6 m/s²."
     )
-    limiar = alt.Chart(pd.DataFrame({"v": [6.0]})).mark_rule(
-        strokeDash=[6, 4], strokeWidth=2, color="#44355b",
-    ).encode(x=alt.X("v:Q"))
-    st.altair_chart((pontos + medianas + limiar).properties(height=170), width="stretch")
 
     st.markdown("###### Trajetos que ultrapassaram o limiar do firmware (~6 m/s^2)")
     resumo_evento = _contagem_com_evento(dados, "ComportamentoBinario", ordem)
