@@ -52,6 +52,12 @@ G = 9.80665
 # perdia a marca de 8 m/s². Largura fixa e igual nas quatro tambem mantem o
 # mesmo pixel por m/s² de uma figura para a outra.
 LARGURA_FIGURA = 900
+# Figura 2: altura util de cada linha de rotulo, mais a folga que o eixo x, o
+# titulo dele e o padding consomem. O Streamlit pede ao Vega um autosize que
+# INCLUI essa folga na altura declarada, entao declarar so ALTURA_LINHA * n
+# faz a area de plotagem encolher e as linhas colarem umas nas outras.
+ALTURA_LINHA = 56
+FOLGA_EIXO = 64
 
 # Limiares de referência da literatura, em m/s² (ver docstring do módulo tab_*).
 LIT = {
@@ -181,49 +187,91 @@ def fig1_escala_do_limiar(df: pd.DataFrame, limiar: float,
 
 
 # ==========================================================================
-# FIGURA 2 — distribuição do pico por rótulo comportamental
+# FIGURA 2 — pico por rótulo comportamental
 # ==========================================================================
-def fig2_pico_por_estilo(df: pd.DataFrame, largura: int = LARGURA_FIGURA) -> alt.LayerChart:
-    """Um ponto por trajeto, uma linha por rótulo, ordenadas pela mediana.
+def fig2_pico_por_estilo(df: pd.DataFrame, limiar: float,
+                         largura: int = LARGURA_FIGURA) -> alt.LayerChart:
+    """Uma barra por rótulo, com os trajetos como pontos discretos acima dela.
 
-    A mediana é desenhada em tinta neutra e rotulada com o valor: contar
-    pontinhos empilhados não é trabalho do leitor.
+    Substitui o dot plot que ocupava este lugar. Quarenta pontos em três
+    linhas exigiam que o leitor estimasse o centro de cada nuvem antes de
+    concluir qualquer coisa; a barra já entrega a comparação pronta, e o
+    comprimento dela até a marca do limiar é a segunda leitura da figura.
+
+    Os pontos continuam na figura, mas em cinza e acima da barra, nunca atrás
+    dela: barra sobre pontos esconderia metade de cada grupo, e nenhum trajeto
+    pode sumir de uma figura que declara n.
+
+    Inverte de propósito a convenção das outras figuras deste módulo, onde a
+    mediana é neutra e as categorias coloridas: aqui a barra É a categoria, e
+    quem precisa ficar em tinta neutra são os trajetos individuais.
     """
     ordem = _ordem_por_mediana(df)
     rot = _rotulo_n(df)
-    d = df.assign(faixa=df["estilo"].map(rot))
     ordem_rot = [rot[e] for e in ordem]
+    d = df.assign(faixa=df["estilo"].map(rot))
 
     med = (df.groupby("estilo", as_index=False)["pico_ms2"].median()
            .rename(columns={"pico_ms2": "mediana"}))
     med["faixa"] = med["estilo"].map(rot)
-    med["texto"] = med["mediana"].map(lambda v: f"md {v:.1f}".replace(".", ","))
+    med["texto"] = med["mediana"].map(lambda v: f"{v:.1f} m/s²".replace(".", ","))
 
-    eixo_x = alt.Axis(title="Pico de aceleração do trajeto (m/s²) — cada ponto é um trajeto",
-                      tickCount=9)
+    # Escala presa ao zero e estendida ate depois do limiar: a barra so pode
+    # ser lida como comprimento se comecar no zero, e a distancia ate o limiar
+    # e a propria conclusao da figura.
+    escala_x = alt.Scale(domain=[0, limiar + 0.6], nice=False)
+    eixo_x = alt.Axis(title="Pico de aceleração do trajeto (m/s²)", tickCount=8)
+    eixo_y = alt.Y("faixa:N", title=None, sort=ordem_rot,
+                   axis=alt.Axis(domain=False, ticks=False, labelFontWeight="bold",
+                                 labelLimit=220))
 
-    pontos = alt.Chart(d).mark_circle(size=80, opacity=1, stroke="white",
-                                      strokeWidth=1.5).encode(
-        x=alt.X("pico_ms2:Q", axis=eixo_x, scale=alt.Scale(zero=False, nice=True)),
-        y=alt.Y("faixa:N", title=None, sort=ordem_rot,
-                axis=alt.Axis(domain=False, ticks=False, labelFontWeight="bold",
-                              labelLimit=220)),
+    barra = alt.Chart(med).mark_bar(height=14, cornerRadius=2, opacity=0.92).encode(
+        x=alt.X("mediana:Q", scale=escala_x, axis=eixo_x),
+        y=eixo_y,
         color=alt.Color("estilo:N", scale=ESCALA_COR, legend=None),
+        tooltip=[alt.Tooltip("estilo:N", title="Rótulo"),
+                 alt.Tooltip("mediana:Q", title="Mediana do pico (m/s²)", format=".2f")],
+    )
+    # O valor sobe acima da ponta da barra: na mesma linha ele caía justamente
+    # onde ficam os primeiros trajetos à direita da mediana. Dentro da barra
+    # também não serve -- branco sobre o laranja e o verde não tem contraste.
+    valor = alt.Chart(med).mark_text(align="left", dx=6, dy=-14, fontSize=13,
+                                     fontWeight="bold", color=TINTA).encode(
+        x=alt.X("mediana:Q", scale=escala_x, axis=eixo_x), y=eixo_y, text="texto:N")
+
+    # Os trajetos ficam na MESMA linha da barra, não deslocados acima dela: um
+    # yOffset em pixel não sobrevive ao redimensionamento do Streamlit -- o
+    # deslocamento efetivo cresce, e os pontos de um rótulo acabam pousando na
+    # barra do rótulo de cima. Contorno branco para o ponto se ler tanto sobre a
+    # barra colorida quanto sobre o fundo claro à direita dela.
+    pontos = alt.Chart(d).mark_circle(size=46, opacity=0.9, color=TINTA2,
+                                      stroke="white", strokeWidth=1.2).encode(
+        x=alt.X("pico_ms2:Q", scale=escala_x, axis=eixo_x),
+        y=eixo_y,
         tooltip=[alt.Tooltip("trajeto_id:N", title="Trajeto"),
                  alt.Tooltip("motorista:N", title="Motorista"),
                  alt.Tooltip("via:N", title="Via"),
                  alt.Tooltip("duracao_min:Q", title="Duração (min)", format=".1f"),
                  alt.Tooltip("pico_ms2:Q", title="Pico (m/s²)", format=".2f")],
     )
-    tick = alt.Chart(med).mark_tick(thickness=2.5, size=34, color=TINTA).encode(
-        x="mediana:Q", y=alt.Y("faixa:N", sort=ordem_rot))
-    rotulo = alt.Chart(med).mark_text(dy=-24, fontSize=11.5, fontWeight="bold",
-                                      color=TINTA).encode(
-        x="mediana:Q", y=alt.Y("faixa:N", sort=ordem_rot), text="texto:N")
 
-    return _tema((pontos + tick + rotulo).properties(
-        width=largura, height=62 * len(ordem_rot),
-        padding={"top": 26, "left": 5, "right": 12, "bottom": 5}))
+    # A régua ocupa a altura cheia da área de plotagem, sem y/y2 em pixel: sob
+    # o autosize "fit" do Streamlit, extremos fixados em pixel somam-se ao eixo,
+    # estouram a altura declarada e o Vega encolhe a figura inteira.
+    regua = alt.Chart(pd.DataFrame({"v": [limiar]})).mark_rule(
+        color=DESTAQUE, strokeWidth=2.5).encode(
+        x=alt.X("v:Q", scale=escala_x, axis=eixo_x))
+    # O rótulo da régua vai para a folga reservada acima da área de plotagem,
+    # onde não cruza a própria linha nem a fileira de pontos.
+    rot_regua = alt.Chart(pd.DataFrame({
+        "v": [limiar], "t": [f"limiar do firmware · {limiar:.0f} m/s²".replace(".", ",")],
+    })).mark_text(align="right", dx=-8, dy=-9, baseline="bottom", fontSize=11.5,
+                  fontWeight="bold", color=DESTAQUE).encode(
+        x=alt.X("v:Q", scale=escala_x, axis=eixo_x), y=alt.value(0), text="t:N")
+
+    return _tema((barra + pontos + valor + regua + rot_regua).properties(
+        width=largura, height=ALTURA_LINHA * len(ordem_rot) + FOLGA_EIXO,
+        padding={"top": 26, "left": 5, "right": 14, "bottom": 5}))
 
 
 # ==========================================================================
