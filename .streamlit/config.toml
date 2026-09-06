@@ -1,7 +1,10 @@
 [theme]
 base = "light"
-primaryColor = "#e87ba4"
-backgroundColor = "#fff5f8"
-secondaryBackgroundColor = "#ffe3ec"
-textColor = "#1f1520"
+# Identidade roxo/violeta. O rosa anterior (#e87ba4 / #fff5f8 / #ffe3ec) brigava
+# com a barra lateral, que ja era roxa (#2e2440), e reprovava o piso de
+# contraste do validador de paleta como cor de serie.
+primaryColor = "#7b3fbf"
+backgroundColor = "#f8f5fd"
+secondaryBackgroundColor = "#ece4f7"
+textColor = "#1d1526"
 font = "sans serif"
