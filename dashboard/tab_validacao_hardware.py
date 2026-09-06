@@ -162,11 +162,13 @@ def render(df: pd.DataFrame, limiar: float) -> None:
 
     # ---------------------------------------------------------------- 04
     st.subheader("04 · O sinal existe — o limiar é que não o alcança")
-    st.altair_chart(fig2_pico_por_estilo(df), width="content")
+    st.altair_chart(fig2_pico_por_estilo(df, limiar), width="content")
     st.caption(
-        "**Figura 2.** Um ponto por trajeto; o traço escuro é a mediana do grupo, com o valor "
-        "escrito e o n no rótulo da linha. As linhas estão ordenadas da menor para a maior "
-        "mediana. Sonolenta acima de agressiva não é erro de pipeline: condução sonolenta "
+        "**Figura 2.** A barra é a mediana do pico daquele rótulo, com o valor escrito e o n "
+        "no rótulo da linha; os pontos cinza sobre cada barra são os trajetos que entraram "
+        "nela. As linhas estão ordenadas da menor para a maior mediana, e a marca à direita é "
+        "o limiar do firmware — a distância até ela é o segundo achado da figura. "
+        "Sonolenta acima de agressiva não é erro de pipeline: condução sonolenta "
         "produz correções tardias de trajetória — desvios bruscos de volante e frenagens de "
         "recuperação — que a magnitude sem decomposição por eixo registra igual a uma frenagem forte."
     )
