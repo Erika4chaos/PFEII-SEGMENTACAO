@@ -365,6 +365,139 @@ def avaliar_limiares(magnitudes: pd.DataFrame, limiares: list) -> pd.DataFrame:
     return pd.DataFrame(linhas)
 
 
+# ---------------------------------------------------------------------------
+# Varredura 2D de calibracao do detector (limiar x taxa minima)
+# ---------------------------------------------------------------------------
+# O detector do firmware tem DOIS parametros, nao um: o limiar de magnitude T,
+# que decide se uma amostra e evento, e a taxa minima N de eventos por minuto a
+# partir da qual o trajeto e sinalizado. Varrer so T (avaliar_limiares) responde
+# "quanto do sinal passa"; varrer os dois responde "que par separa conducao
+# agressiva de normal", que e a pergunta de projeto.
+#
+# Sonolenta fica FORA das metricas de proposito. O rotulo e um estilo de
+# conducao instruido, nao uma medida fisiologica, e o efeito nao e consistente
+# entre condutores -- misturar os tres rotulos faria a sensibilidade medir duas
+# coisas diferentes ao mesmo tempo. A taxa de sinalizacao de sonolenta e
+# reportada em colunas proprias, para inspecao, sem entrar em Youden.
+GRADE_LIMIAR_MS2 = np.round(np.arange(1.5, 4.001, 0.1), 2)
+GRADE_TAXA_MIN = np.round(np.arange(0.0, 2.001, 0.1), 2)
+
+ESPECIFICIDADE_MINIMA = 0.85
+
+
+def _perfil_deteccao(pasta_trajeto: Path) -> dict:
+    """Le o sinal bruto de UM trajeto e guarda o que a varredura precisa.
+
+    Guarda a magnitude ordenada em vez de recalcula-la a cada limiar: como
+    detectar_eventos() marca evento por amostra isolada (magnitude > T), a
+    contagem de eventos em T e o numero de amostras a direita de T no vetor
+    ordenado. Uma busca binaria por limiar da exatamente o mesmo numero que
+    reprocessar o trajeto, sem reler o arquivo 26 vezes."""
+    df_acc = carregar_acelerometro(pasta_trajeto / "RAW_ACCELEROMETERS.txt")
+    return {
+        "trajeto": pasta_trajeto.name,
+        "motorista": extrair_motorista(pasta_trajeto),
+        "comportamento": detectar_comportamento(pasta_trajeto),
+        "duracao_min": (df_acc["timestamp"].max() - df_acc["timestamp"].min()) / 60.0,
+        "magnitude_ordenada": np.sort(calcular_magnitude_ms2(df_acc).to_numpy()),
+    }
+
+
+def _taxa_eventos(perfil: dict, limiar_ms2: float) -> float:
+    """Eventos por minuto do trajeto sob um limiar. Espelha a regra de
+    detectar_eventos(): comparacao ESTRITA, magnitude > limiar."""
+    magnitude = perfil["magnitude_ordenada"]
+    n_eventos = magnitude.size - int(np.searchsorted(magnitude, limiar_ms2, side="right"))
+    duracao = perfil["duracao_min"]
+    return n_eventos / duracao if duracao > 0 else 0.0
+
+
+def varrer_calibracao(raiz: Path, limiares=GRADE_LIMIAR_MS2,
+                      taxas=GRADE_TAXA_MIN) -> pd.DataFrame:
+    """Sensibilidade, especificidade e Youden para cada par (limiar, taxa min).
+
+    Um trajeto e sinalizado quando eventos(T)/duracao_min > N. Sensibilidade e
+    a fracao de trajetos agressivos sinalizados; especificidade, a fracao de
+    normais NAO sinalizados; Youden = sensibilidade + especificidade - 1, que
+    vale 0 para um detector que nao distingue os dois grupos.
+
+    Com n=40 (17 normais, 11 agressivos), cada trajeto move a sensibilidade em
+    ~9 pontos e a especificidade em ~6. A grade serve para mostrar ONDE existe
+    uma regiao de operacao, nao para eleger um par com precisao decimal."""
+    perfis = [_perfil_deteccao(p) for p in listar_trajetos(raiz)]
+    comportamento = np.array([p["comportamento"] for p in perfis])
+    # Uma coluna por limiar: a taxa de eventos nao depende de N, entao vale a
+    # pena calcula-la uma vez e reutiliza-la em toda a faixa de N.
+    taxa_por_limiar = np.array(
+        [[_taxa_eventos(p, float(limiar)) for limiar in limiares] for p in perfis]
+    )
+
+    eh_normal = comportamento == "normal"
+    eh_agressiva = comportamento == "agressiva"
+    eh_sonolenta = comportamento == "sonolenta"
+    n_normal, n_agressiva = int(eh_normal.sum()), int(eh_agressiva.sum())
+    n_sonolenta = int(eh_sonolenta.sum())
+
+    linhas = []
+    for coluna, limiar in enumerate(limiares):
+        for taxa_minima in taxas:
+            sinalizado = taxa_por_limiar[:, coluna] > taxa_minima
+            agressivos_sinalizados = int((sinalizado & eh_agressiva).sum())
+            normais_sinalizados = int((sinalizado & eh_normal).sum())
+            sensibilidade = agressivos_sinalizados / n_agressiva if n_agressiva else np.nan
+            especificidade = (n_normal - normais_sinalizados) / n_normal if n_normal else np.nan
+            linhas.append({
+                "limiar_ms2": float(limiar),
+                "taxa_min_eventos_min": float(taxa_minima),
+                "n_agressiva": n_agressiva,
+                "agressiva_sinalizados": agressivos_sinalizados,
+                "sensibilidade": sensibilidade,
+                "n_normal": n_normal,
+                "normal_sinalizados": normais_sinalizados,
+                "especificidade": especificidade,
+                "youden": sensibilidade + especificidade - 1,
+                "n_sonolenta": n_sonolenta,
+                "sonolenta_sinalizados": int((sinalizado & eh_sonolenta).sum()),
+            })
+
+    grade = pd.DataFrame(linhas)
+    grade["taxa_sonolenta"] = np.where(
+        grade["n_sonolenta"] > 0, grade["sonolenta_sinalizados"] / grade["n_sonolenta"], np.nan)
+    return grade
+
+
+def _melhor_par(grade: pd.DataFrame) -> pd.Series:
+    """Melhor linha da grade, com desempate declarado: maior Youden, depois
+    maior especificidade (falso positivo custa mais que falso negativo numa
+    regra que dispara cobranca), depois o MENOR limiar e a MENOR taxa, porque
+    entre pares equivalentes o mais sensivel e o que sobra evidencia para
+    reavaliar depois. Sem o desempate, a linha escolhida dependeria da ordem
+    de iteracao da grade."""
+    ordenada = grade.sort_values(
+        ["youden", "especificidade", "limiar_ms2", "taxa_min_eventos_min"],
+        ascending=[False, False, True, True])
+    return ordenada.iloc[0]
+
+
+def avaliar_par(raiz: Path, limiar_ms2: float, taxa_minima: float) -> pd.Series:
+    """Mesmas metricas da grade para UM par arbitrario. Existe para avaliar o
+    limiar vigente (T=6,0, N=0), que fica fora da faixa varrida."""
+    grade = varrer_calibracao(raiz, limiares=[limiar_ms2], taxas=[taxa_minima])
+    return grade.iloc[0]
+
+
+def _formatar_par(linha: pd.Series) -> str:
+    return (
+        f"T={linha['limiar_ms2']:.1f} m/s^2, N={linha['taxa_min_eventos_min']:.1f} ev/min"
+        f"  ->  sensibilidade {100 * linha['sensibilidade']:5.1f}% "
+        f"({int(linha['agressiva_sinalizados'])}/{int(linha['n_agressiva'])} agressivos)"
+        f" | especificidade {100 * linha['especificidade']:5.1f}% "
+        f"({int(linha['n_normal'] - linha['normal_sinalizados'])}/{int(linha['n_normal'])} normais)"
+        f" | Youden {linha['youden']:+.3f}"
+        f" | sonolenta sinalizada {int(linha['sonolenta_sinalizados'])}/{int(linha['n_sonolenta'])}"
+    )
+
+
 # Recorte por trajeto consumido pela aba "Validacao de Hardware" do dashboard.
 # E o MESMO df_resumo de processar_dataset(), apenas renomeado: nenhuma coluna
 # nova e derivada aqui, para que o dashboard nao possa divergir do pipeline.
@@ -527,6 +660,37 @@ def main():
     montar_trajetos(df_resumo).to_csv(caminho_trajetos, index=False)
     print(f"Trajetos (contrato do dashboard) salvos em: {caminho_trajetos}")
 
+    print()
+    print("=== Varredura de calibracao (limiar x taxa minima) ===")
+    print(f"{len(GRADE_LIMIAR_MS2)} limiares de {GRADE_LIMIAR_MS2[0]:.1f} a "
+          f"{GRADE_LIMIAR_MS2[-1]:.1f} m/s^2 x {len(GRADE_TAXA_MIN)} taxas de "
+          f"{GRADE_TAXA_MIN[0]:.1f} a {GRADE_TAXA_MIN[-1]:.1f} ev/min. "
+          "Metricas so com trajetos normais e agressivos; sonolenta reportada a parte.")
+    grade = varrer_calibracao(dataset_dir)
+    caminho_grade = saida_dir / "grade_calibracao.csv"
+    grade.to_csv(caminho_grade, index=False)
+
+    print()
+    print("1. Maior Youden")
+    print("   " + _formatar_par(_melhor_par(grade)))
+
+    print()
+    print(f"2. Maior Youden com especificidade >= {100 * ESPECIFICIDADE_MINIMA:.0f}%")
+    restrita = grade[grade["especificidade"] >= ESPECIFICIDADE_MINIMA]
+    if restrita.empty:
+        print(f"   Nenhum par da grade atinge especificidade >= "
+              f"{100 * ESPECIFICIDADE_MINIMA:.0f}%.")
+    else:
+        print("   " + _formatar_par(_melhor_par(restrita)))
+
+    print()
+    print("3. Limiar vigente, para comparacao (fora da faixa varrida)")
+    print("   " + _formatar_par(avaliar_par(dataset_dir, THRESH_MAG_MS2, 0.0)))
+
+    print()
+    print(f"Grade completa salva em: {caminho_grade}")
+    print("THRESH_MAG_MS2 permanece em "
+          f"{THRESH_MAG_MS2} m/s^2 -- esta rodada so gera a evidencia.")
 
 if __name__ == "__main__":
     main()
