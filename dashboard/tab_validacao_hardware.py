@@ -8,8 +8,10 @@ resultado antes de dizer o que estava sendo testado):
     03  onde o limiar do firmware cai na régua da literatura
     04  distribuição do pico por rótulo comportamental
     05  curva de sensibilidade — que limiar escolher
-    06  efeito pareado dentro do mesmo motorista
-    07  cobertura da base e o que este resultado não é
+    06  o que muda se o limiar for recalibrado — a figura de defesa
+    07  a varredura (limiar x taxa mínima) inteira, para conferência
+    08  efeito pareado dentro do mesmo motorista
+    09  cobertura da base e o que este resultado não é
 
 Referências das faixas da Figura 1 (todas em desaceleração brusca):
   * padrões DOT: 0,25–0,78 g para veículos de passeio; ~0,20 g para pesados;
@@ -30,6 +32,7 @@ do número no projeto.
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import pandas as pd
@@ -38,14 +41,59 @@ import streamlit as st
 from .charts_validacao import (
     G, LIT, ESTILOS,
     fig1_escala_do_limiar, fig2_pico_por_estilo, fig3_sensibilidade,
-    fig4_delta_por_motorista, tabela_cobertura,
+    fig4_delta_por_motorista, fig5_antes_depois, fig6_grade_calibracao,
+    tabela_cobertura,
 )
 
 COLUNAS = ["trajeto_id", "motorista", "estilo", "via",
            "duracao_min", "pico_ms2", "eventos", "eventos_min"]
 
+CAMINHO_GRADE = "data/processed/grade_calibracao.csv"
 
 RAIZ_PROJETO = Path(__file__).resolve().parent.parent
+
+# O piso de especificidade e a regra de desempate da varredura sao IMPORTADOS
+# do pipeline, nunca reescritos aqui: se o dashboard aplicasse a propria regra,
+# poderia recomendar um par diferente do que src/validacao_hardware.py imprime,
+# e as duas respostas conviveriam sem ninguem notar.
+if str(RAIZ_PROJETO / "src") not in sys.path:
+    sys.path.append(str(RAIZ_PROJETO / "src"))
+from validacao_hardware import ESPECIFICIDADE_MINIMA, _melhor_par  # noqa: E402
+
+
+def carregar_grade(caminho: str = CAMINHO_GRADE) -> pd.DataFrame | None:
+    """Grade da varredura de calibracao, ou None se ela ainda nao foi gerada.
+
+    Ausencia nao e erro: a grade sai de uma passada sobre o sinal bruto do
+    UAH-DriveSet, que nem toda copia do projeto tem em disco."""
+    alvo = Path(caminho)
+    if not alvo.is_absolute():
+        alvo = RAIZ_PROJETO / alvo
+    return pd.read_csv(alvo) if alvo.exists() else None
+
+
+def ponto_operacao(df: pd.DataFrame, sinalizado: pd.Series,
+                   limiar: float, taxa_minima: float) -> dict:
+    """Mesmas metricas da grade, para um par que nao esta nela.
+
+    Serve ao limiar vigente: ele fica fora da faixa varrida (1,5 a 4,0 m/s²),
+    entao o numero de comparacao e calculado aqui, a partir da coluna `eventos`
+    que o proprio pipeline gerou naquele limiar."""
+    agressiva = df["estilo"] == "agressiva"
+    normal = df["estilo"] == "normal"
+    n_agressiva, n_normal = int(agressiva.sum()), int(normal.sum())
+    agressiva_sinalizados = int((sinalizado & agressiva).sum())
+    normal_sinalizados = int((sinalizado & normal).sum())
+    sensibilidade = agressiva_sinalizados / n_agressiva if n_agressiva else float("nan")
+    especificidade = (n_normal - normal_sinalizados) / n_normal if n_normal else float("nan")
+    return {
+        "limiar_ms2": limiar, "taxa_min_eventos_min": taxa_minima,
+        "n_agressiva": n_agressiva, "agressiva_sinalizados": agressiva_sinalizados,
+        "sensibilidade": sensibilidade,
+        "n_normal": n_normal, "normal_sinalizados": normal_sinalizados,
+        "especificidade": especificidade,
+        "youden": sensibilidade + especificidade - 1,
+    }
 
 
 def carregar(caminho: str = "data/processed/uah_trips.csv") -> pd.DataFrame:
@@ -192,7 +240,79 @@ def render(df: pd.DataFrame, limiar: float) -> None:
     )
 
     # ---------------------------------------------------------------- 06
-    st.subheader("06 · O efeito se sustenta dentro do mesmo motorista")
+    st.subheader("06 · O que muda se o limiar for recalibrado")
+    grade = carregar_grade()
+    if grade is None:
+        st.info(
+            "Rode `python src/validacao_hardware.py` para gerar "
+            f"`{CAMINHO_GRADE}` e esta seção aparece.", icon="ℹ️",
+        )
+    else:
+        vigente = ponto_operacao(df, df["eventos_min"] > 0, limiar, 0.0)
+        candidatos = grade[grade["especificidade"] >= ESPECIFICIDADE_MINIMA]
+        recomendado = _melhor_par(candidatos if not candidatos.empty else grade).to_dict()
+        melhor_j = _melhor_par(grade).to_dict()
+
+        st.altair_chart(fig5_antes_depois(vigente, recomendado), width="content")
+        st.caption(
+            f"**Figura 5.** À esquerda de cada linha, o que o firmware entrega hoje "
+            f"(T = {_br(limiar, 0)} m/s², qualquer evento sinaliza); à direita, o par "
+            f"recomendado (T = {_br(recomendado['limiar_ms2'])} m/s², "
+            f"N = {_br(recomendado['taxa_min_eventos_min'])} eventos/min). A troca é "
+            f"explícita: a detecção de condução agressiva sai de "
+            f"{_br(100 * vigente['sensibilidade'], 0)}% para "
+            f"{_br(100 * recomendado['sensibilidade'], 0)}%, e o preço disso é deixar de "
+            f"preservar {int(recomendado['normal_sinalizados'] - vigente['normal_sinalizados'])} "
+            f"trajeto(s) normal(is) que hoje nunca disparariam."
+        )
+
+        c1, c2, c3 = st.columns(3)
+        _cartao(
+            c1, "Quanto o detector discrimina hoje?",
+            f"Youden {_br(vigente['youden'], 3)}", "#eb6834",
+            "Zero é o valor de um detector que não separa os dois grupos. É onde o "
+            "limiar da Seção 2.8 está: nunca dispara, então nunca erra e nunca acerta.",
+        )
+        _cartao(
+            c2, "E com o par recomendado?",
+            f"Youden {_br(recomendado['youden'], 3)}", "#0ca30c",
+            f"Especificidade de {_br(100 * recomendado['especificidade'], 0)}%, acima do "
+            f"piso de {_br(100 * ESPECIFICIDADE_MINIMA, 0)}% que a varredura impôs — "
+            "falso positivo custa mais que falso negativo numa regra que vira preço.",
+        )
+        _cartao(
+            c3, "E se otimizar só o Youden?",
+            f"Youden {_br(melhor_j['youden'], 3)}", "#4b555b",
+            f"T = {_br(melhor_j['limiar_ms2'])} m/s², N = "
+            f"{_br(melhor_j['taxa_min_eventos_min'])}. Ganha "
+            f"{_br(100 * (melhor_j['sensibilidade'] - recomendado['sensibilidade']), 0)} ponto(s) "
+            "de sensibilidade e perde especificidade — não é a recomendação, é o teto.",
+        )
+
+        # ------------------------------------------------------------ 07
+        st.subheader("07 · A varredura inteira, para conferência")
+        st.altair_chart(fig6_grade_calibracao(grade, recomendado), width="content")
+        n_pares = len(grade)
+        st.caption(
+            f"**Figura 6.** Os {n_pares} pares testados: cada célula é um firmware "
+            f"possível, e a cor é o quanto aquele firmware separaria condução agressiva "
+            f"de normal. O círculo branco é o par recomendado. O ponto importante para a "
+            f"leitura não é o pico e sim a **região**: há uma faixa larga de limiares "
+            f"entre {_br(grade['limiar_ms2'].min())} e "
+            f"{_br(grade[grade['youden'] >= 0.6]['limiar_ms2'].max())} m/s² que funciona "
+            f"quase igual, então a escolha não depende de acertar a segunda casa decimal. "
+            f"**O limiar de hoje ({_br(limiar, 0)} m/s²) não aparece na figura porque está "
+            f"fora da faixa varrida**, à direita de todas essas colunas."
+        )
+        st.caption(
+            "A varredura usa apenas trajetos normais e agressivos. O rótulo sonolenta "
+            "ficaria em cima de duas coisas ao mesmo tempo — ver a ressalva no fim da aba — "
+            "e por isso entra na grade só como coluna de inspeção, nunca no cálculo do "
+            "Youden. Grade completa e regra de desempate em `src/validacao_hardware.py`."
+        )
+
+    # ---------------------------------------------------------------- 08
+    st.subheader("08 · O efeito se sustenta dentro do mesmo motorista")
     st.altair_chart(fig4_delta_por_motorista(df), width="content")
     st.caption(
         "**Figura 4.** Comparação pareada dentro de cada condutor, o que elimina a hipótese de "
@@ -201,8 +321,8 @@ def render(df: pd.DataFrame, limiar: float) -> None:
         "mesmo gráfico foi o que tornou o painel anterior ilegível."
     )
 
-    # ---------------------------------------------------------------- 07
-    st.subheader("07 · Onde a base é fina")
+    # ---------------------------------------------------------------- 09
+    st.subheader("09 · Onde a base é fina")
     st.dataframe(tabela_cobertura(df), width="stretch", hide_index=True)
     st.caption(
         "Trajetos por motorista e rótulo; entre parênteses, a divisão entre rodovia (R) e via "
