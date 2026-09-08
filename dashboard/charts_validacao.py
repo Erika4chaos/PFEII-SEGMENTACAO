@@ -405,6 +405,154 @@ def fig4_delta_por_motorista(df: pd.DataFrame, largura: int = LARGURA_FIGURA) ->
 
 
 # ==========================================================================
+# FIGURA 5 — o que muda ao recalibrar (a figura de defesa)
+# ==========================================================================
+# Rampa sequencial de um tom so, validada com scripts/validate_palette.py
+# --ordinal: luminosidade monotona, degraus visiveis e a classe mais clara
+# ainda separada do fundo (2,19:1). Usa o roxo da identidade, distinto das
+# tres cores categoricas de estilo, porque codifica MAGNITUDE, nao categoria.
+RAMPA_ROXO = ["#bfa0e2", "#a67ed3", "#8c5cc0", "#7140a6", "#552a85", "#3a1760"]
+
+COR_VIGENTE = "#8a4b12"      # mesmo tom do limiar atual nas outras figuras
+COR_RECOMENDADO = "#1baf7a"
+
+
+def fig5_antes_depois(vigente: dict, recomendado: dict,
+                      largura: int = LARGURA_FIGURA) -> alt.LayerChart:
+    """As duas metricas que a banca vai perguntar, antes e depois.
+
+    Uma linha por metrica, dois pontos ligados: o valor com o limiar que esta
+    no firmware hoje e o valor com o par recomendado. E a figura mais direta
+    da aba, e por isso vem ANTES da grade completa -- a grade e a conferencia,
+    esta e a afirmacao.
+
+    So duas metricas de proposito. Sensibilidade e especificidade respondem
+    "pega quem dirige mal?" e "incomoda quem dirige bem?", que sao as duas
+    perguntas de produto; Youden e um resumo das duas e fica como numero no
+    texto, nao como terceira barra.
+    """
+    linhas = []
+    for rotulo, ponto in (("Limiar de hoje", vigente), ("Recomendado", recomendado)):
+        # int() explicito: quando o ponto vem de uma linha da grade, o pandas
+        # entrega as contagens como float e o rotulo sairia "9.0 de 11.0".
+        linhas.append({
+            "metrica": "Agressivos", "cenario": rotulo,
+            "valor": 100 * ponto["sensibilidade"],
+            "detalhe": f"{int(ponto['agressiva_sinalizados'])} de "
+                       f"{int(ponto['n_agressiva'])}",
+        })
+        linhas.append({
+            "metrica": "Normais", "cenario": rotulo,
+            "valor": 100 * ponto["especificidade"],
+            "detalhe": f"{int(ponto['n_normal']) - int(ponto['normal_sinalizados'])} de "
+                       f"{int(ponto['n_normal'])}",
+        })
+    d = pd.DataFrame(linhas)
+    d["texto"] = [f"{v:.0f}%  ({t})" for v, t in zip(d["valor"], d["detalhe"])]
+    # Rotulos curtos e o sentido no titulo do eixo. Nomes longos no eixo y sao
+    # medidos com a fonte declarada no tema e desenhados com a que a maquina
+    # tem: "Agressivos detectados" vinha sem o ultimo caractere. O enquadramento
+    # tambem fica melhor -- uma metrica so ("acertou?"), lida em dois grupos,
+    # em vez de sensibilidade e especificidade como conceitos separados.
+    ordem_metrica = ["Agressivos", "Normais"]
+    escala_cor = alt.Scale(domain=["Limiar de hoje", "Recomendado"],
+                           range=[COR_VIGENTE, COR_RECOMENDADO])
+
+    escala_x = alt.Scale(domain=[0, 118], nice=False)
+    eixo_x = alt.Axis(title="% do grupo que o detector trata corretamente",
+                      values=[0, 25, 50, 75, 100])
+    eixo_y = alt.Y("metrica:N", title=None, sort=ordem_metrica,
+                   axis=alt.Axis(domain=False, ticks=False, labelFontWeight="bold",
+                                 labelLimit=320))
+
+    faixa = (d.pivot(index="metrica", columns="cenario", values="valor")
+             .reset_index().rename(columns={"Limiar de hoje": "antes", "Recomendado": "depois"}))
+    ligacao = alt.Chart(faixa).mark_rule(strokeWidth=2, color="#c3bccd").encode(
+        x=alt.X("antes:Q", scale=escala_x, axis=eixo_x), x2=alt.X2("depois:Q"), y=eixo_y)
+
+    pontos = alt.Chart(d).mark_point(size=190, filled=True, opacity=1,
+                                     stroke="white", strokeWidth=1.5).encode(
+        x=alt.X("valor:Q", scale=escala_x, axis=eixo_x), y=eixo_y,
+        color=alt.Color("cenario:N", scale=escala_cor,
+                        legend=alt.Legend(orient="top", direction="horizontal",
+                                          title=None, labelFontSize=12, symbolSize=140)),
+        shape=alt.Shape("cenario:N", legend=None,
+                        scale=alt.Scale(domain=["Limiar de hoje", "Recomendado"],
+                                        range=["square", "circle"])),
+        tooltip=[alt.Tooltip("cenario:N", title="Cenário"),
+                 alt.Tooltip("metrica:N", title="Métrica"),
+                 alt.Tooltip("valor:Q", title="%", format=".1f"),
+                 alt.Tooltip("detalhe:N", title="Trajetos")],
+    )
+    # Uma camada de texto por cenario, cada uma com seu proprio deslocamento
+    # vertical: em "Normais preservados" os dois valores ficam a 12 pontos de
+    # distancia e os rotulos se sobreporiam na mesma linha. (yOffset nao aceita
+    # condicao no Vega-Lite, dai serem duas camadas em vez de uma.)
+    rotulos = [
+        alt.Chart(d[d["cenario"] == cenario]).mark_text(
+            align="left", dx=14, dy=deslocamento, fontSize=11.5, fontWeight="bold",
+            color=cor,
+        ).encode(x=alt.X("valor:Q", scale=escala_x, axis=eixo_x), y=eixo_y, text="texto:N")
+        for cenario, deslocamento, cor in (
+            ("Limiar de hoje", -13, COR_VIGENTE),
+            ("Recomendado", 13, COR_RECOMENDADO),
+        )
+    ]
+
+    # A altura declarada e o TOTAL quando o Streamlit ajusta o grafico ao
+    # container (autosize "fit"): legenda e eixo saem dela, nao se somam a ela.
+    # Com 62px por linha sobravam 32px para as duas faixas e os rotulos
+    # deslocados se encavalavam. A folga de 110px cobre legenda mais eixo.
+    return _tema(alt.layer(ligacao, pontos, *rotulos).properties(
+        width=largura, height=70 * len(ordem_metrica) + 110,
+        padding={"left": 26, "top": 4, "right": 14, "bottom": 4}))
+
+
+# ==========================================================================
+# FIGURA 6 — a grade de calibracao inteira
+# ==========================================================================
+def fig6_grade_calibracao(grade: pd.DataFrame, melhor: dict,
+                          largura: int = LARGURA_FIGURA) -> alt.LayerChart:
+    """Youden para cada par (limiar, taxa minima) da varredura.
+
+    A figura 5 afirma; esta mostra de onde a afirmacao saiu, e que o ponto
+    escolhido nao e um pico isolado de ruido, e sim o centro de uma regiao
+    inteira de pares que funcionam. E o que responde "por que 2,3 e nao 2,4?"
+    -- a resposta honesta e "tanto faz, e a figura deixa isso visivel".
+
+    Youden = sensibilidade + especificidade - 1. Zero significa um detector
+    que nao distingue os dois grupos; 1 seria separacao perfeita.
+    """
+    melhor_ponto = pd.DataFrame([{
+        "limiar_ms2": melhor["limiar_ms2"],
+        "taxa_min_eventos_min": melhor["taxa_min_eventos_min"],
+    }])
+
+    celulas = alt.Chart(grade).mark_rect().encode(
+        x=alt.X("limiar_ms2:O",
+                title="Limiar de magnitude T (m/s²)",
+                axis=alt.Axis(labelAngle=0, labelOverlap=True, format=".1f")),
+        y=alt.Y("taxa_min_eventos_min:O",
+                title="Taxa mínima N (eventos/min)",
+                sort="descending", axis=alt.Axis(format=".1f")),
+        color=alt.Color("youden:Q", title="Youden",
+                        scale=alt.Scale(range=RAMPA_ROXO, type="quantize", nice=False),
+                        legend=alt.Legend(orient="right", gradientLength=170,
+                                          format=".2f")),
+        tooltip=[alt.Tooltip("limiar_ms2:Q", title="Limiar T (m/s²)", format=".1f"),
+                 alt.Tooltip("taxa_min_eventos_min:Q", title="Taxa mín. N", format=".1f"),
+                 alt.Tooltip("youden:Q", title="Youden", format=".3f"),
+                 alt.Tooltip("sensibilidade:Q", title="Sensibilidade", format=".1%"),
+                 alt.Tooltip("especificidade:Q", title="Especificidade", format=".1%")],
+    )
+    marca = alt.Chart(melhor_ponto).mark_point(
+        size=150, shape="circle", filled=False, stroke="white", strokeWidth=2.5,
+    ).encode(x=alt.X("limiar_ms2:O"), y=alt.Y("taxa_min_eventos_min:O", sort="descending"))
+
+    return _tema((celulas + marca).properties(width=largura, height=330))
+
+
+# ==========================================================================
 # Tabela de cobertura — expõe o confundidor motorista × estilo × via
 # ==========================================================================
 def tabela_cobertura(df: pd.DataFrame) -> pd.DataFrame:
