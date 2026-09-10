@@ -15,6 +15,8 @@ import sys
 from pathlib import Path
 
 import altair as alt
+import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
 import streamlit as st
 from sklearn.decomposition import PCA
@@ -304,6 +306,29 @@ def aplicar_estilo():
         .kpi-card .val { font-size: 24px; font-weight: 700; margin-top: 5px; color: var(--text); }
         .kpi-card .val small { font-size: 12px; color: var(--muted); font-weight: 500; }
 
+        /* Cartoes com icone (KPIs da Segmentacao e specs de hardware) --
+           sempre em tons de roxo/violeta, nunca nas cores dos graficos. */
+        .icon-tile-card {
+            background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+            padding: 14px 16px; display: flex; align-items: center; gap: 14px;
+        }
+        .icon-tile-icon {
+            font-size: 20px; width: 42px; height: 42px; border-radius: 10px;
+            background: var(--accent-soft); color: #6a3a96;
+            display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+        }
+        .icon-tile-card.icon-tile-solid .icon-tile-icon { background: var(--accent); color: #ffffff; }
+        .icon-tile-body .lbl {
+            font-size: 11.5px; color: var(--muted); font-weight: 600;
+            letter-spacing: 0.02em; text-transform: uppercase;
+        }
+        .icon-tile-body .val { font-size: 20px; font-weight: 700; margin-top: 2px; color: var(--text); }
+        .icon-tile-body .val small { font-size: 11.5px; color: var(--muted); font-weight: 500; }
+        .icon-tile-card.icon-tile-centered {
+            flex-direction: column; text-align: center; gap: 8px; padding: 16px 12px;
+        }
+        .icon-tile-card.icon-tile-centered .icon-tile-icon { width: 46px; height: 46px; font-size: 22px; }
+
         /* Tabela de perfis customizada (render_tabela_perfis) */
         .tabela-perfis { width: 100%; border-collapse: collapse; font-size: 12.5px; }
         .tabela-perfis th {
@@ -355,20 +380,22 @@ def render_sidebar() -> str:
 
 def render_linha_kpis(dados: dict):
     itens = [
-        ("Apolices", str(int(dados["n_apolices"])), ""),
-        ("Premio medio / veic.", _fmt_brl_compacto(dados["premio_por_veiculo_medio"]), "por veiculo/ano"),
-        ("LMI medio / veic.", _fmt_brl_compacto(dados["lmi_por_veiculo_medio"]), "por veiculo"),
-        ("Custo hist. medio", _fmt_brl_compacto(dados["valor_pago_historico_medio"]), "por sinistro declarado"),
-        ("Motorista licenciado", f"{dados['pct_motorista_licenciado']:.0%}", ""),
-        ("Taxa de referral", f"{dados['taxa_referral']:.0%}", "aprovacao especial"),
+        ("👥", "Apolices", str(int(dados["n_apolices"])), ""),
+        ("💰", "Premio medio / veic.", _fmt_brl_compacto(dados["premio_por_veiculo_medio"]), "por veiculo/ano"),
+        ("🛡️", "LMI medio / veic.", _fmt_brl_compacto(dados["lmi_por_veiculo_medio"]), "por veiculo"),
+        ("⚠️", "Custo hist. medio", _fmt_brl_compacto(dados["valor_pago_historico_medio"]), "por sinistro declarado"),
+        ("🪪", "Motorista licenciado", f"{dados['pct_motorista_licenciado']:.0%}", ""),
+        ("⏱️", "Taxa de referral", f"{dados['taxa_referral']:.0%}", "aprovacao especial"),
     ]
     colunas = st.columns(len(itens))
-    for coluna, (rotulo, valor, secundario) in zip(colunas, itens):
+    for coluna, (icone, rotulo, valor, secundario) in zip(colunas, itens):
         with coluna:
             st.markdown(
-                f'<div class="kpi-card"><div class="lbl">{rotulo}</div>'
+                '<div class="icon-tile-card icon-tile-centered">'
+                f'<div class="icon-tile-icon">{icone}</div>'
+                f'<div class="icon-tile-body"><div class="lbl">{rotulo}</div>'
                 f'<div class="val">{valor}'
-                f'{f" <small>{secundario}</small>" if secundario else ""}</div></div>',
+                f'{f" <small>{secundario}</small>" if secundario else ""}</div></div></div>',
                 unsafe_allow_html=True,
             )
 
@@ -616,6 +643,29 @@ def render_view_segmentacao(projecao, variancia_pct, kpis_cluster, gerais, signi
 # validacao_hardware.montar_trajetos). Ver o dispatch em main().
 # ---------------------------------------------------------------------------
 
+def render_specs_hardware():
+    """Cabecalho fixo com a arquitetura do no de telemetria (firmware/esp32),
+    exibido acima das 9 secoes de tab_validacao_hardware.py. Sao fatos de
+    projeto (nao resultado calculado) -- taxa de amostragem conferida em
+    firmware/esp32/include/config.h (TAXA_AMOSTRAGEM_HZ 50), nao a taxa do
+    UAH-DriveSet (10Hz) usada so na validacao."""
+    tiles = [
+        ("🖥️", "Microcontrolador", "ESP32 Dual-Core"),
+        ("📡", "Acelerometro MPU-6050", "Amostragem 50Hz"),
+        ("📶", "Transmissao (Store-and-Forward)", "Wi-Fi / MQTT QoS 1"),
+        ("🔋", "Eficiencia Green IT", "Filtragem na borda (LittleFS)"),
+    ]
+    colunas = st.columns(len(tiles))
+    for coluna, (icone, rotulo, valor) in zip(colunas, tiles):
+        with coluna:
+            st.markdown(
+                '<div class="icon-tile-card icon-tile-centered">'
+                f'<div class="icon-tile-icon">{icone}</div>'
+                f'<div class="icon-tile-body"><div class="lbl">{rotulo}</div>'
+                f'<div class="val">{valor}</div></div></div>',
+                unsafe_allow_html=True,
+            )
+
 # ---------------------------------------------------------------------------
 # Aba 3 -- Coligacao Conceitual (Part A.7 / C) -- passeio ilustrativo, sem
 # juncao real entre dados sinteticos de apolice e dados publicos de conducao.
@@ -652,7 +702,49 @@ def render_exemplo_perfil(perfil_numero: int, apolice: pd.Series, evento: pd.Ser
     st.divider()
 
 
-def render_view_coligacao(original: pd.DataFrame, mapa_perfil: dict, validacao: pd.DataFrame):
+def calcular_radar_perfis(normalizada: pd.DataFrame, significancia: pd.DataFrame,
+                          mapa_perfil: dict, top_n: int = 6):
+    """Media por perfil das `top_n` variaveis mais discriminantes (mesmo
+    ranking por p_valor de render_insights), na matriz Min-Max 0-1 ja usada
+    no K-Means -- escalada para 0-100 so para leitura no radar. Nenhum numero
+    inventado: e a mesma normalizacao do pipeline, so reagrupada por perfil."""
+    variaveis = significancia.sort_values("p_valor")["variavel"].head(top_n).tolist()
+    dados = normalizada.copy()
+    dados["perfil_numero"] = dados["cluster"].map(mapa_perfil)
+    medias = dados.groupby("perfil_numero")[variaveis].mean() * 100
+    return variaveis, medias
+
+
+def render_radar_perfis(variaveis: list, medias: pd.DataFrame):
+    perfis_radar = [p for p in (1, 2) if p in medias.index]
+    if len(variaveis) < 3 or not perfis_radar:
+        st.caption("Rode src/perfilamento.py para gerar os testes de significancia.")
+        return
+
+    angulos = np.linspace(0, 2 * np.pi, len(variaveis), endpoint=False).tolist()
+    angulos += angulos[:1]
+
+    fig, ax = plt.subplots(figsize=(5.2, 5.2), subplot_kw={"polar": True})
+    fig.patch.set_alpha(0.0)
+    for perfil_numero in perfis_radar:
+        valores = medias.loc[perfil_numero, variaveis].tolist()
+        valores += valores[:1]
+        cor = CORES_PERFIL[perfil_numero]
+        ax.plot(angulos, valores, color=cor, linewidth=2, label=NOME_PERFIL[perfil_numero])
+        ax.fill(angulos, valores, color=cor, alpha=0.15)
+    ax.set_xticks(angulos[:-1])
+    ax.set_xticklabels(variaveis, fontsize=8.5, color="#44355b")
+    ax.set_ylim(0, 100)
+    ax.tick_params(axis="y", labelsize=7.5, colors="#65596f")
+    ax.spines["polar"].set_color("#e3dcea")
+    ax.grid(color="#e3dcea")
+    ax.legend(loc="upper right", bbox_to_anchor=(1.35, 1.12), fontsize=8.5, frameon=False)
+    st.pyplot(fig, width="content")
+    plt.close(fig)
+
+
+def render_view_coligacao(original: pd.DataFrame, mapa_perfil: dict, validacao: pd.DataFrame,
+                          normalizada: pd.DataFrame, significancia: pd.DataFrame):
     st.markdown(
         '<div class="no-join-banner">'
         '<b>Nao ha juncao real entre os dois conjuntos de dados nesta aba.</b> '
@@ -670,6 +762,19 @@ def render_view_coligacao(original: pd.DataFrame, mapa_perfil: dict, validacao: 
         '</div>',
         unsafe_allow_html=True,
     )
+
+    if significancia is not None and not significancia.empty:
+        st.markdown("##### Raio-X dos perfis nas variaveis mais discriminantes")
+        st.caption(
+            "Complemento quantitativo ao banner acima, nao uma excecao a ele: usa "
+            "somente dados reais da Parte A (segmentacao) -- as mesmas variaveis e a "
+            "mesma normalizacao Min-Max do K-Means, so reagrupadas por perfil e "
+            "reescaladas a 0-100 para caber no radar. Nenhuma informacao de hardware "
+            "entra aqui."
+        )
+        variaveis_radar, medias_radar = calcular_radar_perfis(normalizada, significancia, mapa_perfil)
+        render_radar_perfis(variaveis_radar, medias_radar)
+        st.divider()
 
     st.markdown("##### Como a coligacao funcionaria (arquitetura conceitual, Secao 2.2.5/3.4)")
     st.caption(
@@ -849,9 +954,10 @@ def main():
             original, mapa_perfil,
         )
     elif view == "Validacao de Hardware":
+        render_specs_hardware()
         render(carregar("data/processed/uah_trips.csv"), limiar=THRESH_MAG_MS2)
     elif view == "Coligacao Conceitual":
-        render_view_coligacao(original, mapa_perfil, validacao_uah)
+        render_view_coligacao(original, mapa_perfil, validacao_uah, normalizada, significancia)
 
     with st.expander("Exportar dados"):
         render_view_exportar()
