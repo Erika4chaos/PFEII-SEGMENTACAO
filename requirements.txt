@@ -6,4 +6,5 @@ matplotlib
 seaborn
 streamlit
 altair
+plotly
 Faker
