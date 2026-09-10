@@ -1,11 +1,25 @@
 """
-Etapa 4 (Secao 3.5.4): dashboard Streamlit com tres secoes, navegadas por
-botoes na barra lateral -- Segmentacao (projecao PCA 2D dos clusters,
-tabela de perfis, KPIs e indices de validacao tecnica), Validacao de
-Hardware (discriminacao do limiar de ~6 m/s^2 do firmware, aplicado ao
-UAH-DriveSet, ROMERA; BERGASA; ARROYO, 2016) e Coligacao Conceitual
-(passeio ilustrativo perfil x trajeto de hardware, sem juncao real de
-dados).
+Dashboard Seguros IoT -- plataforma hibrida de validacao de risco
+(PFE II, Etapa 4 / Secao 3.5.4).
+
+Tres abas, na estrutura do painel desenhado pela autora:
+  * Software (K-Means)     -- Segmentacao da carteira (Parte A)
+  * Hardware (IoT Edge)    -- Validacao da assinatura inercial (Parte B)
+  * Integracao UBI         -- Coligacao conceitual das duas camadas
+
+Todo numero em tela vem do pipeline real (data/processed/*.csv). O mockup
+que serviu de referencia visual trazia valores de exemplo (2.489 apolices,
+radar 0-100 arbitrario, "amostragem 10Hz") -- nenhum deles foi copiado: a
+taxa real do firmware e 50Hz (firmware/esp32/include/config.h) e todas as
+estatisticas saem dos CSVs gerados por src/.
+
+A analise metodologica longa da camada de hardware -- as nove secoes de
+dashboard/tab_validacao_hardware.py (regua da literatura, curva de
+sensibilidade, varredura de calibracao, efeito pareado por motorista,
+tabela de cobertura) -- continua no repositorio e volta a aparecer com uma
+chamada a `tab_validacao_hardware.render(df, limiar)`. Ela saiu da tela a
+pedido da autora, para que o painel abrisse na leitura curta; os modulos
+nao foram removidos.
 
 Uso:
     streamlit run dashboard/app.py
@@ -14,72 +28,92 @@ Uso:
 import sys
 from pathlib import Path
 
-import altair as alt
-import matplotlib.pyplot as plt
-import numpy as np
 import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
 import streamlit as st
 from sklearn.decomposition import PCA
-from sklearn.metrics import calinski_harabasz_score, davies_bouldin_score, silhouette_score
 
 RAIZ = Path(__file__).resolve().parent.parent
-# src/ para os modulos de pipeline; a raiz para importar `dashboard` como
-# pacote (a Aba 2 vive em dashboard/tab_validacao_hardware.py).
 sys.path.append(str(RAIZ / "src"))
 sys.path.append(str(RAIZ))
 from preprocessamento import COLUNAS_19  # noqa: E402
 from validacao_hardware import THRESH_MAG_MS2  # noqa: E402
-from dashboard.tab_validacao_hardware import render, carregar  # noqa: E402
+from dashboard.tab_validacao_hardware import (  # noqa: E402
+    carregar_histograma, carregar_limiar_recalibrado, contagem_por_faixa,
+)
 
 DADOS_DIR = RAIZ / "data" / "processed"
 
-TIPO_SINISTRO_LABEL = {0: "nenhum identificado", 1: "tombamento", 2: "incendio", 3: "terceiros"}
-
-CARTEIRA_COMPLETA = "Carteira completa"
-
+# Nome longo (linguagem da metodologia) e nome curto (o que cabe no cartao e
+# na tabela). Os dois descrevem o mesmo perfil da Secao 3.4.
 NOME_PERFIL = {
     1: "Perfil 1 - Frota de Alto Risco Operacional",
     2: "Perfil 2 - Segurado de Alta Cobertura e Baixo Custo Relativo",
-    3: "Perfil 3 - Cotacao em Referral ou Conversao Tardia",
+    3: "Perfil 3 - Cotação em Referral ou Conversão Tardia",
+}
+NOME_CURTO = {
+    1: "1 - Alto Risco (Agravo)",
+    2: "2 - Baixo Risco (Desconto)",
+    3: "3 - Risco Incerto (Referral)",
 }
 
-# Paleta categorica (roxo/azul/verde) validada com scripts/validate_palette.py
-# da skill dataviz para 3 series em grafico de dispersao (checagem --pairs all):
-# todos os checks passam, pior par #2a78d6 x #8e2f9e com dE 9,6 sob deuteranopia
-# e 20,8 na visao normal. O roxo substituiu o rosa #e87ba4 anterior, que passava
-# na separacao mas reprovava o contraste contra o fundo claro (2,62:1). Roxo mais
-# claro nao serve: qualquer violeta que puxe para o azul cai para dE 4-7 contra o
-# azul do Perfil 2 -- foi por isso que este tom puxa para o magenta.
-# Cor atribuida por PERFIL (numero de negocio), nao pelo indice arbitrario que o
-# K-Means da ao cluster, para que a identidade visual nao mude entre execucoes.
-CORES_PERFIL = {1: "#8e2f9e", 2: "#2a78d6", 3: "#008300"}
-COR_LINHA_DESTAQUE = "#6d3bc4"
+# Paleta de risco (vermelho/verde/ambar), escolhida pela autora no desenho do
+# painel: a cor carrega o significado de negocio, o que ajuda a leitura pela
+# banca. Substitui a paleta roxo/azul/verde anterior, que era validada para
+# daltonismo com scripts/validate_palette.py -- se a acessibilidade voltar a
+# pesar mais que a semantica, o mapa antigo era {1:"#8e2f9e", 2:"#2a78d6",
+# 3:"#008300"}. A cor e atribuida por PERFIL, nunca pelo indice que o K-Means
+# sorteia para o cluster, para a identidade visual nao mudar entre execucoes.
+CORES_PERFIL = {1: "#ef4444", 2: "#10b981", 3: "#f59e0b"}
+CLASSE_BADGE = {1: "badge-red", 2: "badge-green", 3: "badge-yellow"}
 
-# Citacao academica da fonte de validacao de hardware (Part B.5 do escopo
-# tecnico). O UAH-DriveSet e a fonte prevista no plano original; um
-# dataset de conducao ja segmentado em janelas (Ferreira Jr. et al., 2017)
-# foi usado como substituto temporario enquanto o host/espelhos do
-# UAH-DriveSet estiveram indisponiveis -- ver historico em
-# src/validacao_hardware.py. Nao reintroduzir a substituicao sem que o
-# UAH-DriveSet volte a ficar inacessivel.
-FONTE_CITACAO = "UAH-DriveSet (Romera; Bergasa; Arroyo, 2016)"
-
-COMPORTAMENTO_LABEL = {
-    "normal": "Normal", "agressiva": "Agressiva", "sonolenta": "Sonolenta",
-    "desconhecido": "Desconhecido",
+# Acao de hardware prevista por perfil -- regra de negocio da Secao 3.4
+# (o dispositivo como agravo, como fidelizacao e como condicao de emissao),
+# nao um numero calculado.
+ACAO_HARDWARE = {
+    1: "Mandatório (renovação)",
+    2: "Opcional (fidelização)",
+    3: "Condição de emissão",
 }
-# As cores por rotulo comportamental vivem em dashboard/charts_validacao.py
-# (ESTILOS/CORES), junto das figuras que as usam. COMPORTAMENTO_LABEL fica aqui
-# porque a Aba 3 ainda rotula o trajeto ilustrativo com ele.
 
+# Cores dos rotulos comportamentais do UAH-DriveSet. Verde/ambar/vermelho
+# para casar com as tres caixas de status logo ao lado do grafico.
+CORES_COMPORTAMENTO = {
+    "normal": ("#10b981", "16,185,129"),
+    "sonolenta": ("#f59e0b", "245,158,11"),
+    "agressiva": ("#ef4444", "239,68,68"),
+}
+ORDEM_COMPORTAMENTO = ["normal", "sonolenta", "agressiva"]
 
-def _fmt_brl(valor: float) -> str:
-    return f"R$ {valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+FONTE_CITACAO = "UAH-DriveSet (ROMERA; BERGASA; ARROYO, 2016)"
+
+# Rotulo de apresentacao das 19 variaveis do Quadro 2. O nome tecnico continua
+# sendo a chave em todo o pipeline; isto e so o texto que a banca le no radar.
+ROTULO_VARIAVEL = {
+    "total_veiculos": "Tamanho da frota",
+    "pct_autonomos": "% de autônomos/terceiros",
+    "motorista_licenciado": "Motorista licenciado",
+    "classe_risco": "Classe de risco",
+    "sinistralidade_rc_declarada": "Sinistralidade RC declarada",
+    "sinistralidade_rcfv_declarada": "Sinistralidade RCFV declarada",
+    "valor_pago_historico": "Custo histórico pago",
+    "valor_sinistro_historico": "Valor histórico de sinistro",
+    "qt_cias_anteriores": "Seguradoras anteriores",
+    "tipo_sinistro_predominante": "Tipo de sinistro predominante",
+    "lmi_por_veiculo": "LMI por veículo",
+    "premio_por_veiculo": "Prêmio por veículo",
+    "qt_coberturas_ativas": "Coberturas ativas",
+    "agravo_aplicado": "Agravo aplicado",
+    "desconto_aplicado": "Desconto aplicado",
+    "referral_pendente": "Referral pendente",
+    "tempo_cotacao_emissao": "Tempo cotação → emissão",
+    "parcelas_com_juros": "Parcelas com juros",
+    "apolice_anterior": "Apólice anterior",
+}
 
 
 def _fmt_brl_compacto(valor: float) -> str:
-    """Formato curto para caber nos cartoes de KPI estreitos (mockup usa o
-    mesmo padrao: 'R$ 1,8 mi', 'R$ 112 mil')."""
     if abs(valor) >= 1_000_000:
         texto = f"R$ {valor / 1_000_000:.1f} mi"
     elif abs(valor) >= 1_000:
@@ -89,6 +123,19 @@ def _fmt_brl_compacto(valor: float) -> str:
     return texto.replace(".", ",")
 
 
+def _br(valor: float, casas: int = 1) -> str:
+    return f"{valor:.{casas}f}".replace(".", ",")
+
+
+def _int_br(valor: int) -> str:
+    return f"{int(valor):,}".replace(",", ".")
+
+
+# ---------------------------------------------------------------------------
+# Dados -- tudo lido dos CSVs que src/ produz; o dashboard nunca recalcula
+# deteccao de evento, limiar ou rotulo.
+# ---------------------------------------------------------------------------
+
 @st.cache_data
 def carregar_dados():
     normalizada = pd.read_csv(DADOS_DIR / "matriz_normalizada_clusters.csv")
@@ -97,30 +144,9 @@ def carregar_dados():
 
 
 @st.cache_data
-def carregar_validacao_k():
-    caminho = DADOS_DIR / "validacao_k.csv"
-    return pd.read_csv(caminho) if caminho.exists() else None
-
-
-@st.cache_data
 def carregar_significancia():
     caminho = DADOS_DIR / "perfis_testes_significancia.csv"
     return pd.read_csv(caminho) if caminho.exists() else None
-
-
-@st.cache_data
-def carregar_validacao_uah():
-    """Le o resumo por trajeto ja calculado por src/validacao_hardware.py
-    (deteccao de eventos pelo limiar do firmware + rotulo comportamental
-    extraido do nome da pasta) -- o dashboard nunca reimplementa a
-    deteccao nem a extracao de rotulo, apenas consome o CSV que o script
-    produz (ver Part B.5/A.7 do escopo tecnico)."""
-    caminho = DADOS_DIR / "validacao_hardware_uah_driveset.csv"
-    if not caminho.exists():
-        return None
-    df = pd.read_csv(caminho)
-    df["ComportamentoLabel"] = df["comportamento"].map(COMPORTAMENTO_LABEL).fillna(df["comportamento"])
-    return df
 
 
 def projetar_pca(normalizada: pd.DataFrame) -> tuple[pd.DataFrame, float]:
@@ -133,9 +159,8 @@ def projetar_pca(normalizada: pd.DataFrame) -> tuple[pd.DataFrame, float]:
 
 
 def numero_perfil(medias: pd.Series) -> int:
-    """Heuristica simples que confronta as medias do cluster no espaco
-    original com os tres perfis-alvo da Secao 3.4, para apresentacao em
-    linguagem de negocio (sem expor os detalhes matematicos do modelo)."""
+    """Confronta as medias do cluster no espaco original com os tres
+    perfis-alvo da Secao 3.4, para apresentacao em linguagem de negocio."""
     if medias["referral_pendente"] > 0.5:
         return 3
     if medias["qt_coberturas_ativas"] >= 5 and medias["agravo_aplicado"] < 0.2:
@@ -152,781 +177,533 @@ def calcular_kpis_por_cluster(original: pd.DataFrame, mapa_perfil: dict) -> pd.D
     kpis = original.groupby("cluster").agg(
         premio_por_veiculo_medio=("premio_por_veiculo", "mean"),
         lmi_por_veiculo_medio=("lmi_por_veiculo", "mean"),
-        pct_motorista_licenciado=("motorista_licenciado", "mean"),
         valor_pago_historico_medio=("valor_pago_historico", "mean"),
         taxa_referral=("referral_pendente", "mean"),
-        tempo_medio_conversao=("tempo_cotacao_emissao", "mean"),
         n_apolices=("numeroApolice", "count"),
     ).reset_index()
     kpis["perfil_numero"] = kpis["cluster"].map(mapa_perfil)
-    kpis["nome_perfil"] = kpis["perfil_numero"].map(NOME_PERFIL)
-    kpis["cor"] = kpis["perfil_numero"].map(CORES_PERFIL)
     return kpis.sort_values("perfil_numero").reset_index(drop=True)
 
 
-def calcular_kpis_gerais(original: pd.DataFrame) -> dict:
-    return {
-        "n_apolices": len(original),
-        "premio_por_veiculo_medio": original["premio_por_veiculo"].mean(),
-        "lmi_por_veiculo_medio": original["lmi_por_veiculo"].mean(),
-        "pct_motorista_licenciado": original["motorista_licenciado"].mean(),
-        "valor_pago_historico_medio": original["valor_pago_historico"].mean(),
-        "taxa_referral": original["referral_pendente"].mean(),
-    }
+def calcular_radar_perfis(normalizada: pd.DataFrame, significancia: pd.DataFrame,
+                          mapa_perfil: dict, top_n: int = 6):
+    """Media por perfil das `top_n` variaveis mais discriminantes (ranking por
+    p_valor dos testes de significancia), na matriz Min-Max 0-1 que alimentou o
+    K-Means -- escalada a 0-100 so para leitura no radar."""
+    variaveis = significancia.sort_values("p_valor")["variavel"].head(top_n).tolist()
+    dados = normalizada.copy()
+    dados["perfil_numero"] = dados["cluster"].map(mapa_perfil)
+    return variaveis, dados.groupby("perfil_numero")[variaveis].mean() * 100
 
 
-def calcular_indices_validacao(normalizada: pd.DataFrame) -> dict:
-    X = normalizada[COLUNAS_19].to_numpy()
-    rotulos = normalizada["cluster"].to_numpy()
-    return {
-        "Silhouette": silhouette_score(X, rotulos),
-        "Davies-Bouldin": davies_bouldin_score(X, rotulos),
-        "Calinski-Harabasz": calinski_harabasz_score(X, rotulos),
-    }
-
+# ---------------------------------------------------------------------------
+# Estilo
+# ---------------------------------------------------------------------------
 
 def aplicar_estilo():
     st.markdown(
         """
         <style>
-        :root {
-            --navy: #44355b; --navy2: #5a4a75; --navy3: #2e2440;
-            --accent: #7b3fbf; --accent-soft: #ede4f9;
-            /* Violeta claro para uso SOBRE a barra lateral escura: o --accent
-               e escuro demais contra o roxo do painel e some. */
-            --accent-claro: #d9c2f7;
-            --bg: #f7f4fc; --card: #ffffff;
-            --text: #44355b; --muted: #65596f; --line: #e3dcea;
-        }
-        [data-testid="stAppViewContainer"], [data-testid="stMain"] {
-            background-color: var(--bg);
-        }
-        h1 {
-            color: var(--text);
-            border-bottom: 1px solid var(--line);
-            padding-bottom: 0.4rem;
-            font-weight: 700;
-        }
-        h2 {
-            color: var(--text);
-            margin-top: 1.2rem;
-            font-weight: 700;
-        }
-        h3 { color: var(--text); }
-        [data-testid="stMetric"] {
-            background-color: var(--card);
-            border: 1px solid var(--line);
-            border-radius: 12px;
-            padding: 14px 16px 10px 16px;
-        }
-        [data-testid="stMetricLabel"] {
-            color: var(--muted);
-            font-size: 11.5px;
-            font-weight: 600;
-            letter-spacing: 0.02em;
-            text-transform: uppercase;
-        }
-        [data-testid="stMetricValue"] { color: var(--text); font-size: 1.5rem; }
+        .stApp { background-color: #faf5ff; }
 
-        [data-testid="stSidebar"] {
-            background-color: var(--navy3);
+        .stTabs [data-baseweb="tab-list"] { gap: 8px; }
+        .stTabs [data-baseweb="tab"] {
+            background-color: #ede9fe;
+            border-radius: 8px 8px 0px 0px;
+            color: #6d28d9;
+            font-weight: 600;
+            padding: 0.5rem 1.5rem;
+            border: 1px solid #ddd6fe;
+            border-bottom: none;
         }
-        [data-testid="stSidebar"] label, [data-testid="stSidebar"] p,
-        [data-testid="stSidebar"] span, [data-testid="stSidebar"] div {
-            color: #cfc4dc;
+        .stTabs [aria-selected="true"] {
+            background-color: #7c3aed;
+            color: white !important;
+            border-color: #7c3aed;
         }
-        [data-testid="stSidebar"] h1, [data-testid="stSidebar"] h2, [data-testid="stSidebar"] h3 {
-            color: #ffffff;
-            border: none;
+
+        .kpi-card {
+            background-color: white;
+            border: 1px solid #e5e7eb;
+            border-radius: 12px;
+            padding: 20px;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05);
+            border-left: 5px solid #8b5cf6;
+            display: flex;
+            align-items: center;
+            gap: 15px;
+            height: 100%;
         }
-        [data-testid="stSidebar"] button[kind="secondary"] {
-            background-color: transparent;
-            border-color: transparent;
-            color: #cfc4dc;
-            text-align: left;
-            justify-content: flex-start;
-        }
-        [data-testid="stSidebar"] button[kind="secondary"]:hover {
-            background-color: var(--navy2);
-            color: #ffffff;
-        }
-        .side-badge {
-            background: var(--navy2);
+        .kpi-icon {
+            background-color: #ede9fe;
+            color: #7c3aed;
             border-radius: 10px;
             padding: 12px;
-            font-size: 12px;
-            line-height: 1.5;
-            color: #cfc4dc;
-            margin-top: 12px;
+            font-size: 22px;
+            line-height: 1;
         }
-        .side-badge b { color: var(--accent-claro); }
+        .kpi-title {
+            font-size: 0.72rem; text-transform: uppercase; font-weight: 700;
+            color: #6b7280; margin: 0; letter-spacing: 0.05em;
+        }
+        .kpi-value {
+            font-size: 1.4rem; font-weight: 800; color: #1f2937; margin: 5px 0 0 0;
+        }
+        .kpi-sub { font-size: 0.8rem; font-weight: 400; color: #9ca3af; }
 
-        [data-testid="stVerticalBlockBorderWrapper"] {
-            border-color: var(--line) !important;
-            border-radius: 12px !important;
+        .hw-card {
+            background-color: white; border: 1px solid #e5e7eb; border-radius: 12px;
+            padding: 20px; text-align: center; height: 100%;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05);
         }
+        .hw-icon { font-size: 30px; margin-bottom: 10px; }
+        .hw-title {
+            font-size: 0.72rem; text-transform: uppercase; font-weight: 700; color: #6b7280;
+        }
+        .hw-value { font-size: 1.05rem; font-weight: 700; color: #4c1d95; margin-top: 5px; }
 
-        .pill-badge {
-            display: inline-block;
-            background: var(--accent-soft);
-            color: #6a3a96;
-            font-size: 12px;
-            font-weight: 600;
-            padding: 5px 12px;
-            border-radius: 999px;
+        .alert-box {
+            padding: 16px; border-radius: 12px; display: flex;
+            align-items: flex-start; gap: 12px; margin-bottom: 14px;
         }
-        .insight-item { padding: 9px 0; border-bottom: 1px solid var(--line); font-size: 13px; }
-        .insight-item:last-child { border-bottom: none; }
-        .insight-dot {
-            display: inline-block; width: 8px; height: 8px; border-radius: 50%;
-            background: var(--accent); margin-right: 8px; margin-top: 5px;
-            flex-shrink: 0;
-        }
-        .insight-title { font-weight: 700; color: var(--text); font-size: 12.5px; }
-        .insight-caption { color: var(--muted); font-size: 11.5px; line-height: 1.45; }
+        .alert-box h4 { margin: 0 0 4px 0; font-size: 15px; }
+        .alert-box p { margin: 0; font-size: 13.5px; line-height: 1.5; }
+        .alert-good { background-color: #ecfdf5; border: 1px solid #a7f3d0; }
+        .alert-good h4 { color: #065f46; } .alert-good p { color: #047857; }
+        .alert-warn { background-color: #fffbeb; border: 1px solid #fde68a; }
+        .alert-warn h4 { color: #92400e; } .alert-warn p { color: #b45309; }
+        .alert-bad { background-color: #fef2f2; border: 1px solid #fecaca; }
+        .alert-bad h4 { color: #991b1b; } .alert-bad p { color: #b91c1c; }
 
-        .tag-pill {
-            display: inline-block; padding: 3px 10px; border-radius: 999px;
-            font-size: 12px; font-weight: 600; color: #ffffff;
+        .styled-table {
+            width: 100%; border-collapse: collapse; font-size: 13.5px;
+            background-color: white; border-radius: 12px; overflow: hidden;
+            box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05);
         }
-        .no-join-banner {
-            background: #fff3cd; border: 1px solid #e8b83c; border-radius: 10px;
-            padding: 14px 16px; color: #7a5a00; font-size: 13px; line-height: 1.6;
+        .styled-table thead tr {
+            background-color: #ede9fe; color: #4c1d95; text-align: left;
         }
+        .styled-table th, .styled-table td { padding: 12px 15px; }
+        .styled-table tbody tr { border-bottom: 1px solid #f3f4f6; }
+        .styled-table tbody tr:nth-of-type(even) { background-color: #fafaf9; }
+        .badge {
+            padding: 4px 10px; border-radius: 999px; font-size: 11px;
+            font-weight: 600; white-space: nowrap;
+        }
+        .badge-red { background-color: #fee2e2; color: #b91c1c; }
+        .badge-green { background-color: #d1fae5; color: #047857; }
+        .badge-yellow { background-color: #fef3c7; color: #b45309; }
+        .badge-violet { background-color: #ede9fe; color: #6d28d9; }
 
-        /* Cartoes de KPI customizados (render_linha_kpis) */
-        .kpi-card {
-            background: var(--card); border: 1px solid var(--line); border-radius: 12px;
-            padding: 14px 16px;
+        .secao-titulo {
+            color: #4c1d95; font-size: 16px; font-weight: 700; margin-bottom: 4px;
         }
-        .kpi-card .lbl {
-            font-size: 11.5px; color: var(--muted); font-weight: 600;
-            letter-spacing: 0.02em; text-transform: uppercase;
-        }
-        .kpi-card .val { font-size: 24px; font-weight: 700; margin-top: 5px; color: var(--text); }
-        .kpi-card .val small { font-size: 12px; color: var(--muted); font-weight: 500; }
+        .secao-sub { color: #6b7280; font-size: 12.5px; margin-bottom: 14px; }
 
-        /* Cartoes com icone (KPIs da Segmentacao e specs de hardware) --
-           sempre em tons de roxo/violeta, nunca nas cores dos graficos. */
-        .icon-tile-card {
-            background: var(--card); border: 1px solid var(--line); border-radius: 12px;
-            padding: 14px 16px; display: flex; align-items: center; gap: 14px;
+        .nota-integridade {
+            background-color: white; border: 1px solid #ddd6fe;
+            border-left: 5px solid #7c3aed; border-radius: 12px;
+            padding: 14px 18px; color: #4b5563; font-size: 13px; line-height: 1.55;
         }
-        .icon-tile-icon {
-            font-size: 20px; width: 42px; height: 42px; border-radius: 10px;
-            background: var(--accent-soft); color: #6a3a96;
-            display: flex; align-items: center; justify-content: center; flex-shrink: 0;
-        }
-        .icon-tile-card.icon-tile-solid .icon-tile-icon { background: var(--accent); color: #ffffff; }
-        .icon-tile-body .lbl {
-            font-size: 11.5px; color: var(--muted); font-weight: 600;
-            letter-spacing: 0.02em; text-transform: uppercase;
-        }
-        .icon-tile-body .val { font-size: 20px; font-weight: 700; margin-top: 2px; color: var(--text); }
-        .icon-tile-body .val small { font-size: 11.5px; color: var(--muted); font-weight: 500; }
-        .icon-tile-card.icon-tile-centered {
-            flex-direction: column; text-align: center; gap: 8px; padding: 16px 12px;
-        }
-        .icon-tile-card.icon-tile-centered .icon-tile-icon { width: 46px; height: 46px; font-size: 22px; }
+        .nota-integridade b { color: #4c1d95; }
 
-        /* Tabela de perfis customizada (render_tabela_perfis) */
-        .tabela-perfis { width: 100%; border-collapse: collapse; font-size: 12.5px; }
-        .tabela-perfis th {
-            text-align: left; color: var(--muted); font-size: 11px; text-transform: uppercase;
-            letter-spacing: 0.03em; padding: 8px 10px; border-bottom: 1.5px solid var(--line);
+        .card-texto {
+            background-color: white; padding: 26px; border-radius: 12px;
+            border: 1px solid #ddd6fe; height: 100%;
+            box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05);
         }
-        .tabela-perfis td { padding: 10px; border-bottom: 1px solid var(--line); color: var(--text); }
-        .tabela-perfis tr:last-child td { border-bottom: none; }
         </style>
         """,
         unsafe_allow_html=True,
     )
 
 
-NAV_OPCOES = ["Segmentacao", "Validacao de Hardware", "Coligacao Conceitual"]
-
-
-def render_sidebar() -> str:
-    with st.sidebar:
+def _kpi_card(coluna, icone: str, titulo: str, valor: str, sufixo: str = ""):
+    complemento = f' <span class="kpi-sub">{sufixo}</span>' if sufixo else ""
+    with coluna:
         st.markdown(
-            '<h2 style="margin-top:0;">Dashboard de <span style="color:#b07be0;">Risco</span></h2>'
-            '<div style="font-size:12px;margin-bottom:14px;">RCT Transportador</div>',
+            f'<div class="kpi-card"><div class="kpi-icon">{icone}</div><div>'
+            f'<p class="kpi-title">{titulo}</p>'
+            f'<p class="kpi-value">{valor}{complemento}</p>'
+            "</div></div>",
             unsafe_allow_html=True,
         )
 
-        if "view" not in st.session_state:
-            st.session_state["view"] = NAV_OPCOES[0]
 
-        for opcao in NAV_OPCOES:
-            ativo = st.session_state["view"] == opcao
-            if st.button(
-                opcao, key=f"nav_{opcao.replace(' ', '_')}",
-                width="stretch", type=("primary" if ativo else "secondary"),
-            ):
-                st.session_state["view"] = opcao
-
+def _hw_card(coluna, icone: str, titulo: str, valor: str):
+    with coluna:
         st.markdown(
-            '<div class="side-badge"><b>Etapa 4 da metodologia.</b> '
-            'Segmentacao via K-Means (k=3) sobre 19 variaveis derivadas (Quadro 2), '
-            'complementada por validacao independente da camada de hardware (Parte B). '
-            'Correlacao espacial com criminalidade/vulnerabilidade e alertas de '
-            'telemetria por apolice ficam registrados como extensao futura (Secao 3.8).'
-            '</div>',
+            f'<div class="hw-card"><div class="hw-icon">{icone}</div>'
+            f'<p class="hw-title">{titulo}</p>'
+            f'<p class="hw-value">{valor}</p></div>',
             unsafe_allow_html=True,
         )
 
-    return st.session_state["view"]
+
+def _alert_box(classe: str, icone: str, titulo: str, texto: str) -> str:
+    return (
+        f'<div class="alert-box {classe}"><div style="font-size:22px;">{icone}</div>'
+        f"<div><h4>{titulo}</h4><p>{texto}</p></div></div>"
+    )
 
 
-def render_linha_kpis(dados: dict):
-    itens = [
-        ("👥", "Apolices", str(int(dados["n_apolices"])), ""),
-        ("💰", "Premio medio / veic.", _fmt_brl_compacto(dados["premio_por_veiculo_medio"]), "por veiculo/ano"),
-        ("🛡️", "LMI medio / veic.", _fmt_brl_compacto(dados["lmi_por_veiculo_medio"]), "por veiculo"),
-        ("⚠️", "Custo hist. medio", _fmt_brl_compacto(dados["valor_pago_historico_medio"]), "por sinistro declarado"),
-        ("🪪", "Motorista licenciado", f"{dados['pct_motorista_licenciado']:.0%}", ""),
-        ("⏱️", "Taxa de referral", f"{dados['taxa_referral']:.0%}", "aprovacao especial"),
-    ]
-    colunas = st.columns(len(itens))
-    for coluna, (icone, rotulo, valor, secundario) in zip(colunas, itens):
-        with coluna:
-            st.markdown(
-                '<div class="icon-tile-card icon-tile-centered">'
-                f'<div class="icon-tile-icon">{icone}</div>'
-                f'<div class="icon-tile-body"><div class="lbl">{rotulo}</div>'
-                f'<div class="val">{valor}'
-                f'{f" <small>{secundario}</small>" if secundario else ""}</div></div></div>',
-                unsafe_allow_html=True,
-            )
-
-
-def render_scatter(projecao: pd.DataFrame, perfil_selecionado_numero):
-    ordem_nomes = [NOME_PERFIL[n] for n in sorted(projecao["perfil_numero"].unique())]
-    ordem_cores = [CORES_PERFIL[n] for n in sorted(projecao["perfil_numero"].unique())]
-
-    if perfil_selecionado_numero is None:
-        opacidade = alt.value(0.75)
-    else:
-        opacidade = alt.condition(
-            alt.datum.perfil_numero == perfil_selecionado_numero, alt.value(0.85), alt.value(0.12)
-        )
-
-    grafico = alt.Chart(projecao).mark_circle(size=70).encode(
-        x=alt.X("PCA1", title="Componente Principal 1"),
-        y=alt.Y("PCA2", title="Componente Principal 2"),
-        color=alt.Color(
-            "nome_perfil:N", title="Perfil",
-            scale=alt.Scale(domain=ordem_nomes, range=ordem_cores),
-        ),
-        opacity=opacidade,
-        tooltip=["numeroApolice", "nome_perfil", "classe_risco", "premio_por_veiculo",
-                 "valor_pago_historico", "referral_pendente", "tempo_cotacao_emissao"],
-    ).interactive().properties(height=420)
-    st.altair_chart(grafico, width="stretch")
-
-
-def render_insights(significancia: pd.DataFrame, top_n: int = 5):
-    if significancia is None or significancia.empty:
-        st.caption("Rode src/perfilamento.py para gerar os testes de significancia.")
-        return
-    top = significancia.sort_values("p_valor").head(top_n)
-    linhas = []
-    for _, linha in top.iterrows():
-        titulo = f"<code>{linha['variavel']}</code>"
-        legenda = f"{linha['teste']} · p = {linha['p_valor']:.2e}"
-        linhas.append(
-            f'<div class="insight-item"><span class="insight-dot"></span>'
-            f'<span class="insight-title">{titulo}</span><br>'
-            f'<span class="insight-caption" style="margin-left:16px;">{legenda}</span></div>'
-        )
-    st.markdown("".join(linhas), unsafe_allow_html=True)
-
-
-def render_bar_custo(kpis_cluster: pd.DataFrame):
-    grafico = alt.Chart(kpis_cluster).mark_bar(cornerRadiusTopLeft=6, cornerRadiusTopRight=6).encode(
-        x=alt.X("nome_perfil:N", title=None, axis=alt.Axis(labelAngle=0, labels=False)),
-        y=alt.Y("valor_pago_historico_medio:Q", title="Custo historico medio (R$)"),
-        color=alt.Color(
-            "nome_perfil:N", title="Perfil",
-            scale=alt.Scale(
-                domain=[NOME_PERFIL[n] for n in sorted(kpis_cluster["perfil_numero"])],
-                range=[CORES_PERFIL[n] for n in sorted(kpis_cluster["perfil_numero"])],
-            ),
-        ),
-        tooltip=["nome_perfil", alt.Tooltip("valor_pago_historico_medio:Q", format=",.2f")],
-    ).properties(height=260)
-    st.altair_chart(grafico, width="stretch")
-
-
-def render_tabela_perfis(kpis_cluster: pd.DataFrame):
-    linhas_html = []
-    for _, linha in kpis_cluster.sort_values("perfil_numero").iterrows():
-        cor = CORES_PERFIL[int(linha["perfil_numero"])]
-        linhas_html.append(
-            "<tr>"
-            f'<td><span class="tag-pill" style="background:{cor};">'
-            f'Perfil {int(linha["perfil_numero"])}</span></td>'
-            f'<td>{int(linha["n_apolices"])}</td>'
-            f'<td>{_fmt_brl(linha["premio_por_veiculo_medio"])}</td>'
-            f'<td>{_fmt_brl(linha["valor_pago_historico_medio"])}</td>'
-            f'<td>{linha["taxa_referral"]:.0%}</td>'
-            "</tr>"
-        )
+def _titulo_secao(titulo: str, subtitulo: str):
     st.markdown(
-        '<table class="tabela-perfis"><thead><tr>'
-        "<th>Perfil</th><th>Apolices</th><th>Premio/veic.</th>"
-        "<th>Custo hist.</th><th>Referral</th>"
-        "</tr></thead><tbody>" + "".join(linhas_html) + "</tbody></table>",
+        f'<p class="secao-titulo">{titulo}</p>'
+        f'<p class="secao-sub">{subtitulo}</p>',
         unsafe_allow_html=True,
     )
 
 
-def render_histograma_variavel(original: pd.DataFrame, mapa_perfil: dict):
-    st.markdown("##### Distribuicao das variaveis de entrada")
-    st.caption(
-        "Como uma das 19 variaveis derivadas (Quadro 2) usadas no K-Means se "
-        "distribui na carteira, antes de ver os resultados da clusterizacao abaixo."
+def _layout_plotly(fig: go.Figure, altura: int) -> go.Figure:
+    fig.update_layout(
+        height=altura,
+        margin=dict(l=0, r=0, t=10, b=0),
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(color="#4b5563"),
     )
-    col_var, col_toggle = st.columns([3, 1])
-    with col_var:
-        indice_padrao = COLUNAS_19.index("premio_por_veiculo") if "premio_por_veiculo" in COLUNAS_19 else 0
-        variavel = st.selectbox("Variavel", COLUNAS_19, index=indice_padrao, key="hist_variavel")
-    with col_toggle:
-        st.markdown("<div style='margin-top:1.7rem;'></div>", unsafe_allow_html=True)
-        sobrepor = st.toggle("Sobrepor por perfil", value=False, key="hist_sobrepor")
-
-    dados = original.copy()
-    dados["perfil_numero"] = dados["cluster"].map(mapa_perfil)
-    dados["nome_perfil"] = dados["perfil_numero"].map(NOME_PERFIL)
-
-    if sobrepor:
-        ordem_nomes = [NOME_PERFIL[n] for n in sorted(dados["perfil_numero"].unique())]
-        ordem_cores = [CORES_PERFIL[n] for n in sorted(dados["perfil_numero"].unique())]
-        grafico = alt.Chart(dados).mark_bar(opacity=0.6).encode(
-            x=alt.X(f"{variavel}:Q", bin=alt.Bin(maxbins=30), title=variavel),
-            y=alt.Y("count()", title="Numero de apolices", stack=None),
-            color=alt.Color(
-                "nome_perfil:N", title="Perfil",
-                scale=alt.Scale(domain=ordem_nomes, range=ordem_cores),
-            ),
-            tooltip=["nome_perfil", "count()"],
-        ).properties(height=300)
-        st.caption(
-            "Barras sobrepostas (nao empilhadas), uma cor por perfil -- a mesma "
-            "paleta do grafico de clusters no espaco PCA."
-        )
-    else:
-        grafico = alt.Chart(dados).mark_bar(color=COR_LINHA_DESTAQUE).encode(
-            x=alt.X(f"{variavel}:Q", bin=alt.Bin(maxbins=30), title=variavel),
-            y=alt.Y("count()", title="Numero de apolices"),
-            tooltip=["count()"],
-        ).properties(height=300)
-    st.altair_chart(grafico, width="stretch")
-
-
-def render_view_visao_geral(projecao, kpis_cluster, gerais, significancia, perfil_sel_nome,
-                             original, mapa_perfil):
-    perfil_sel_numero = None
-    dados_kpi = gerais
-    if perfil_sel_nome != CARTEIRA_COMPLETA:
-        linha_sel = kpis_cluster[kpis_cluster["nome_perfil"] == perfil_sel_nome].iloc[0]
-        perfil_sel_numero = int(linha_sel["perfil_numero"])
-        dados_kpi = linha_sel.to_dict()
-
-    st.subheader("KPIs")
-    render_linha_kpis(dados_kpi)
-
-    with st.container(border=True):
-        render_histograma_variavel(original, mapa_perfil)
-
-    col_scatter, col_insights = st.columns([1.5, 1])
-    with col_scatter:
-        with st.container(border=True):
-            st.markdown("##### Clusters no espaco PCA")
-            st.caption("Cada ponto e uma apolice; cores por perfil. Passe o mouse para detalhes.")
-            render_scatter(projecao, perfil_sel_numero)
-    with col_insights:
-        with st.container(border=True):
-            st.markdown("##### Variaveis mais discriminantes")
-            st.caption("ANOVA (continuas) e qui-quadrado (binarias/categoricas) entre os 3 perfis")
-            render_insights(significancia)
-
-    col_bar, col_tabela = st.columns([1, 1])
-    with col_bar:
-        with st.container(border=True):
-            st.markdown("##### Custo historico medio de sinistros por perfil")
-            st.caption("valor_pago_historico extraido do campo qst3 (regex)")
-            render_bar_custo(kpis_cluster)
-    with col_tabela:
-        with st.container(border=True):
-            st.markdown("##### Perfis da carteira")
-            st.caption("Estatisticas descritivas no espaco original (medias)")
-            render_tabela_perfis(kpis_cluster)
-
-
-def render_view_clusters(projecao, variancia_pct):
-    st.caption(f"Variancia explicada pelos dois primeiros componentes: {variancia_pct:.1%}")
-    with st.container(border=True):
-        render_scatter(projecao, None)
-
-
-def render_view_validacao_indices(normalizada, validacao_k, significancia):
-    indices = calcular_indices_validacao(normalizada)
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Indice Silhouette", f"{indices['Silhouette']:.4f}")
-    col2.metric("Indice Davies-Bouldin", f"{indices['Davies-Bouldin']:.4f}")
-    col3.metric("Indice Calinski-Harabasz", f"{indices['Calinski-Harabasz']:.1f}")
-    st.caption(
-        "Silhouette: quanto mais proximo de 1, melhor. Davies-Bouldin: quanto mais proximo de 0, "
-        "melhor. Calinski-Harabasz: quanto maior, melhor (sem limite superior)."
-    )
-
-    if validacao_k is not None:
-        st.markdown("##### Metodo do Cotovelo e Indice de Silhouette por k (k=2..8)")
-        col_a, col_b = st.columns(2)
-        with col_a:
-            grafico_cotovelo = alt.Chart(validacao_k).mark_line(
-                point=alt.OverlayMarkDef(color=COR_LINHA_DESTAQUE), color=COR_LINHA_DESTAQUE
-            ).encode(
-                x=alt.X("k:O", title="Numero de clusters (k)"),
-                y=alt.Y("inercia", title="Inercia (WCSS)"),
-            ).properties(height=280)
-            st.altair_chart(grafico_cotovelo, width="stretch")
-        with col_b:
-            grafico_silhouette = alt.Chart(validacao_k).mark_line(
-                point=alt.OverlayMarkDef(color=COR_LINHA_DESTAQUE), color=COR_LINHA_DESTAQUE
-            ).encode(
-                x=alt.X("k:O", title="Numero de clusters (k)"),
-                y=alt.Y("silhouette", title="Indice de Silhouette"),
-            ).properties(height=280)
-            st.altair_chart(grafico_silhouette, width="stretch")
-
-    st.markdown("##### Testes de significancia (todas as variaveis)")
-    if significancia is not None:
-        st.dataframe(
-            significancia, width="stretch", hide_index=True,
-            column_config={
-                "estatistica": st.column_config.NumberColumn(format="%.4f"),
-                "p_valor": st.column_config.NumberColumn(format="%.2e"),
-            },
-        )
-    else:
-        st.caption("Rode src/perfilamento.py para gerar os testes de significancia.")
-
-
-def render_view_segmentacao(projecao, variancia_pct, kpis_cluster, gerais, significancia,
-                             normalizada, validacao_k, original, mapa_perfil):
-    opcoes_segmento = [CARTEIRA_COMPLETA] + kpis_cluster["nome_perfil"].tolist()
-    segmento_selecionado = st.pills(
-        "Filtrar por perfil", opcoes_segmento, default=CARTEIRA_COMPLETA, key="segmento_pills",
-    )
-    if not segmento_selecionado:
-        segmento_selecionado = CARTEIRA_COMPLETA
-
-    aba_geral, aba_clusters, aba_validacao = st.tabs(
-        ["Visao geral", "Clusters (PCA)", "Validacao e insights"]
-    )
-    with aba_geral:
-        render_view_visao_geral(
-            projecao, kpis_cluster, gerais, significancia, segmento_selecionado, original, mapa_perfil
-        )
-    with aba_clusters:
-        render_view_clusters(projecao, variancia_pct)
-    with aba_validacao:
-        render_view_validacao_indices(normalizada, validacao_k, significancia)
+    return fig
 
 
 # ---------------------------------------------------------------------------
-# Aba 2 -- Validacao de Hardware (Part B.5 / A.7): reescrita e movida para
-# dashboard/tab_validacao_hardware.py + dashboard/charts_validacao.py, que
-# consomem data/processed/uah_trips.csv (contrato definido por
-# validacao_hardware.montar_trajetos). Ver o dispatch em main().
+# Aba 1 -- Software (K-Means): segmentacao da carteira (Parte A)
 # ---------------------------------------------------------------------------
 
-def render_specs_hardware():
-    """Cabecalho fixo com a arquitetura do no de telemetria (firmware/esp32),
-    exibido acima das 9 secoes de tab_validacao_hardware.py. Sao fatos de
-    projeto (nao resultado calculado) -- taxa de amostragem conferida em
-    firmware/esp32/include/config.h (TAXA_AMOSTRAGEM_HZ 50), nao a taxa do
-    UAH-DriveSet (10Hz) usada so na validacao."""
-    tiles = [
-        ("🖥️", "Microcontrolador", "ESP32 Dual-Core"),
-        ("📡", "Acelerometro MPU-6050", "Amostragem 50Hz"),
-        ("📶", "Transmissao (Store-and-Forward)", "Wi-Fi / MQTT QoS 1"),
-        ("🔋", "Eficiencia Green IT", "Filtragem na borda (LittleFS)"),
-    ]
-    colunas = st.columns(len(tiles))
-    for coluna, (icone, rotulo, valor) in zip(colunas, tiles):
-        with coluna:
-            st.markdown(
-                '<div class="icon-tile-card icon-tile-centered">'
-                f'<div class="icon-tile-icon">{icone}</div>'
-                f'<div class="icon-tile-body"><div class="lbl">{rotulo}</div>'
-                f'<div class="val">{valor}</div></div></div>',
-                unsafe_allow_html=True,
+def render_tab_software(projecao, kpis_cluster, gerais, variancia_pct):
+    linha_p1 = kpis_cluster[kpis_cluster["perfil_numero"] == 1]
+    custo_p1 = float(linha_p1["valor_pago_historico_medio"].iloc[0]) if not linha_p1.empty else 0.0
+
+    c1, c2, c3, c4 = st.columns(4)
+    _kpi_card(c1, "👥", "Base analisada", _int_br(gerais["n_apolices"]), "apólices")
+    _kpi_card(c2, "💰", "Prêmio médio / veículo",
+              _fmt_brl_compacto(gerais["premio_por_veiculo_medio"]), "por ano")
+    _kpi_card(c3, "⏳", "Taxa de referral", f"{_br(100 * gerais['taxa_referral'])}%")
+    _kpi_card(c4, "⚠️", "Custo médio (Perfil 1)", _fmt_brl_compacto(custo_p1), "/sinistro")
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    col_chart, col_table = st.columns([1, 2])
+
+    with col_chart:
+        _titulo_secao(
+            "Projeção PCA (2D)",
+            f"Redução das {len(COLUNAS_19)} variáveis derivadas (Quadro 2) para "
+            f"visualização espacial dos 3 clusters do K-Means. Os dois componentes "
+            f"explicam {_br(100 * variancia_pct)}% da variância. A projeção é apenas "
+            f"visualização — nunca entra no treino.",
+        )
+        fig = px.scatter(
+            projecao, x="PCA1", y="PCA2", color="perfil_curto",
+            color_discrete_map={NOME_CURTO[n]: CORES_PERFIL[n] for n in NOME_CURTO},
+            category_orders={"perfil_curto": [NOME_CURTO[n] for n in (1, 2, 3)]},
+            custom_data=["numeroApolice"],
+        )
+        fig.update_traces(
+            marker=dict(size=9, opacity=0.8),
+            hovertemplate="Apólice %{customdata[0]}<extra></extra>",
+        )
+        fig.update_layout(
+            xaxis=dict(showgrid=False, zeroline=False, visible=False),
+            yaxis=dict(showgrid=False, zeroline=False, visible=False),
+            legend=dict(orientation="h", yanchor="bottom", y=-0.18,
+                        xanchor="center", x=0.5, title=""),
+        )
+        st.plotly_chart(_layout_plotly(fig, 320), use_container_width=True)
+
+    with col_table:
+        _titulo_secao(
+            "Segmentação estratégica (k=3)",
+            "Médias no espaço original de cada perfil. A coluna de ação via hardware "
+            "é a regra de negócio da Seção 3.4 (o dispositivo como agravo, "
+            "fidelização ou condição de emissão), não um valor calculado.",
+        )
+        linhas = ""
+        for _, linha in kpis_cluster.iterrows():
+            perfil = int(linha["perfil_numero"])
+            linhas += (
+                "<tr>"
+                f'<td style="font-weight:600;color:#1f2937;">{NOME_CURTO[perfil]}</td>'
+                f'<td>{_int_br(linha["n_apolices"])} apólices</td>'
+                f'<td>{_fmt_brl_compacto(linha["lmi_por_veiculo_medio"])}</td>'
+                f'<td>{_fmt_brl_compacto(linha["premio_por_veiculo_medio"])}</td>'
+                f'<td style="font-weight:600;color:#b91c1c;">'
+                f'{_fmt_brl_compacto(linha["valor_pago_historico_medio"])}</td>'
+                f'<td><span class="badge {CLASSE_BADGE[perfil]}">{ACAO_HARDWARE[perfil]}</span></td>'
+                "</tr>"
             )
+        st.markdown(
+            '<table class="styled-table"><thead><tr>'
+            "<th>Perfil identificado</th><th>Volumetria</th><th>LMI médio/veíc.</th>"
+            "<th>Prêmio médio/veíc.</th><th>Custo hist.</th><th>Ação via hardware</th>"
+            "</tr></thead><tbody>" + linhas + "</tbody></table>",
+            unsafe_allow_html=True,
+        )
+
 
 # ---------------------------------------------------------------------------
-# Aba 3 -- Coligacao Conceitual (Part A.7 / C) -- passeio ilustrativo, sem
-# juncao real entre dados sinteticos de apolice e dados publicos de conducao.
+# Aba 2 -- Hardware (IoT Edge): assinatura inercial medida na borda (Parte B)
 # ---------------------------------------------------------------------------
 
-def render_exemplo_perfil(perfil_numero: int, apolice: pd.Series, evento: pd.Series, narrativa: str):
-    st.markdown(f"**{NOME_PERFIL[perfil_numero]}**")
-    col_apolice, col_evento = st.columns(2)
-    with col_apolice:
-        with st.container(border=True):
-            st.markdown("**Apolice (dado sintetico)**")
-            st.caption("Cadastro/cotacao -- lado da segmentacao (Parte A)")
-            st.markdown(
-                f"- Numero: `{apolice['numeroApolice']}`\n"
-                f"- Frota total: {apolice['total_veiculos']:.0f} veiculos "
-                f"({apolice['pct_autonomos']:.0%} autonomos/terceiros)\n"
-                f"- Classe de risco: {apolice['classe_risco']:.0f}/5\n"
-                f"- Coberturas ativas: {apolice['qt_coberturas_ativas']:.0f}\n"
-                f"- Referral pendente: {'sim' if apolice['referral_pendente'] else 'nao'}\n"
-                f"- Custo historico declarado: {_fmt_brl(apolice['valor_pago_historico'])}"
-            )
-    with col_evento:
-        with st.container(border=True):
-            st.markdown(f"**Trajeto de conducao (dataset publico) · {FONTE_CITACAO}**")
-            st.caption("Trajeto real -- lado da validacao de hardware (Parte B)")
-            st.markdown(
-                f"- Comportamento rotulado: {COMPORTAMENTO_LABEL.get(evento['comportamento'], evento['comportamento'])}\n"
-                f"- Motorista: {evento['motorista']} · Tipo de via: {evento['tipo_via']}\n"
-                f"- Eventos por minuto (limiar ~6 m/s^2): {evento['eventos_por_min']:.3f}\n"
-                f"- Aceleracao de pico no trajeto: {evento['magnitude_maxima_ms2']:.2f} m/s^2\n"
-                f"- Velocidade media: {evento['velocidade_media_kmh']:.0f} km/h"
-            )
-    st.caption(narrativa)
-    st.divider()
+def fig_assinatura_inercial(histograma: pd.DataFrame, limiar: float,
+                            limiar_recal: float | None) -> go.Figure:
+    """Densidade da magnitude por rotulo comportamental, sobre as 311 mil
+    amostras do UAH-DriveSet.
 
-
-def calcular_radar_perfis(normalizada: pd.DataFrame, significancia: pd.DataFrame,
-                          mapa_perfil: dict, top_n: int = 6):
-    """Media por perfil das `top_n` variaveis mais discriminantes (mesmo
-    ranking por p_valor de render_insights), na matriz Min-Max 0-1 ja usada
-    no K-Means -- escalada para 0-100 so para leitura no radar. Nenhum numero
-    inventado: e a mesma normalizacao do pipeline, so reagrupada por perfil."""
-    variaveis = significancia.sort_values("p_valor")["variavel"].head(top_n).tolist()
-    dados = normalizada.copy()
-    dados["perfil_numero"] = dados["cluster"].map(mapa_perfil)
-    medias = dados.groupby("perfil_numero")[variaveis].mean() * 100
-    return variaveis, medias
-
-
-def render_radar_perfis(variaveis: list, medias: pd.DataFrame):
-    perfis_radar = [p for p in (1, 2) if p in medias.index]
-    if len(variaveis) < 3 or not perfis_radar:
-        st.caption("Rode src/perfilamento.py para gerar os testes de significancia.")
-        return
-
-    angulos = np.linspace(0, 2 * np.pi, len(variaveis), endpoint=False).tolist()
-    angulos += angulos[:1]
-
-    fig, ax = plt.subplots(figsize=(5.2, 5.2), subplot_kw={"polar": True})
-    fig.patch.set_alpha(0.0)
-    for perfil_numero in perfis_radar:
-        valores = medias.loc[perfil_numero, variaveis].tolist()
-        valores += valores[:1]
-        cor = CORES_PERFIL[perfil_numero]
-        ax.plot(angulos, valores, color=cor, linewidth=2, label=NOME_PERFIL[perfil_numero])
-        ax.fill(angulos, valores, color=cor, alpha=0.15)
-    ax.set_xticks(angulos[:-1])
-    ax.set_xticklabels(variaveis, fontsize=8.5, color="#44355b")
-    ax.set_ylim(0, 100)
-    ax.tick_params(axis="y", labelsize=7.5, colors="#65596f")
-    ax.spines["polar"].set_color("#e3dcea")
-    ax.grid(color="#e3dcea")
-    ax.legend(loc="upper right", bbox_to_anchor=(1.35, 1.12), fontsize=8.5, frameon=False)
-    st.pyplot(fig, width="content")
-    plt.close(fig)
-
-
-def render_view_coligacao(original: pd.DataFrame, mapa_perfil: dict, validacao: pd.DataFrame,
-                          normalizada: pd.DataFrame, significancia: pd.DataFrame):
-    st.markdown(
-        '<div class="no-join-banner">'
-        '<b>Nao ha juncao real entre os dois conjuntos de dados nesta aba.</b> '
-        'A apolice sintetica e o trajeto de conducao publico abaixo nao compartilham '
-        'nenhuma chave/entidade real -- nao existe motorista, veiculo ou vinculo '
-        'contratual em comum entre uma apolice gerada sinteticamente para esta PoC e '
-        'um motorista de um dataset publico de conducao. O par exibido e puramente '
-        'ilustrativo: narra o TIPO de sinal que, em producao, um dispositivo ESP32 '
-        'proprio instalado na frota dessa apolice alimentaria de volta na '
-        'classificacao (Secao 2.2.5 / 3.4.1) -- nao um resultado estatistico '
-        'demonstrado. O UAH-DriveSet entra nesta narrativa apenas como ilustracao do '
-        'TIPO de sinal (evento de frenagem/curva/aceleracao) que, em producao, um '
-        'dispositivo instalado numa transportadora real geraria -- ele nao e, e nunca '
-        'foi, dado coletado de nenhuma apolice deste projeto.'
-        '</div>',
-        unsafe_allow_html=True,
-    )
-
-    if significancia is not None and not significancia.empty:
-        st.markdown("##### Raio-X dos perfis nas variaveis mais discriminantes")
-        st.caption(
-            "Complemento quantitativo ao banner acima, nao uma excecao a ele: usa "
-            "somente dados reais da Parte A (segmentacao) -- as mesmas variaveis e a "
-            "mesma normalizacao Min-Max do K-Means, so reagrupadas por perfil e "
-            "reescaladas a 0-100 para caber no radar. Nenhuma informacao de hardware "
-            "entra aqui."
-        )
-        variaveis_radar, medias_radar = calcular_radar_perfis(normalizada, significancia, mapa_perfil)
-        render_radar_perfis(variaveis_radar, medias_radar)
-        st.divider()
-
-    st.markdown("##### Como a coligacao funcionaria (arquitetura conceitual, Secao 2.2.5/3.4)")
-    st.caption(
-        "Este diagrama descreve o MECANISMO de token/pseudonimizacao do design do "
-        "projeto -- nenhuma destas etapas esta implementada neste codigo (nao ha "
-        "sistema de tokens, ingestao de telemetria ou reassociacao rodando aqui). "
-        "E a arquitetura de producao descrita no texto do TCC, mostrada para "
-        "explicar como um vinculo REAL seria possivel sem expor a identidade da "
-        "apolice ao dispositivo nem ao pipeline de telemetria (LGPD, minimizacao de "
-        "dados -- Parte C)."
-    )
-    st.graphviz_chart(
-        """
-        digraph fluxo {
-            rankdir=LR;
-            bgcolor="transparent";
-            node [shape=box, style="rounded,filled", fontname="Helvetica", fontsize=11, margin=0.18];
-            edge [fontname="Helvetica", fontsize=9, color="#8a7f97", fontcolor="#65596f"];
-
-            perfil [label="Perfil historico\n(cotacao/apolice)\nclassificado Perfil 1/2/3", fillcolor="#8e2f9e", fontcolor="white"];
-            token [label="Token pseudonimo\nassociado a frota/veiculo\n(nunca o numero da apolice)", fillcolor="#f6e6ee", fontcolor="#44355b"];
-            dispositivo [label="Dispositivo ESP32\nna frota\n(so ve o token)", fillcolor="#2a78d6", fontcolor="white"];
-            ingestao [label="Ingestao de telemetria\nrecebe token + evento\nresumido (nunca GPS bruto)", fillcolor="#f6e6ee", fontcolor="#44355b"];
-            reassociacao [label="Reassociacao\nso a seguradora tem o\nmapa token -> apolice", fillcolor="#f6e6ee", fontcolor="#44355b"];
-            classificacao [label="Classificacao\nreforcada ou corrigida\n(decisao com humano no loop)", fillcolor="#008300", fontcolor="white"];
-
-            perfil -> token [label="  emissao do token  "];
-            token -> dispositivo [label="  gravado no dispositivo  "];
-            dispositivo -> ingestao [label="  eventos + token  "];
-            ingestao -> reassociacao [label="  lookup do token  "];
-            reassociacao -> classificacao [label="  feedback  "];
-            classificacao -> perfil [label="  atualiza o perfil  ", style=dashed, color="#6d3bc4", fontcolor="#6d3bc4"];
-        }
-        """
-    )
-    st.caption(
-        "O passo critico de privacidade e 'Reassociacao': o dispositivo e o pipeline "
-        "de ingestao nunca veem o numero da apolice, so o token -- somente a "
-        "seguradora, que emitiu o token, consegue voltar do token ate a apolice. "
-        "A seta tracejada de volta a 'Classificacao' e o loop de feedback descrito "
-        "na Secao 3.4.1: e sempre um sinal de apoio a decisao, nunca uma decisao "
-        "automatica (Parte C, LGPD Art. 20)."
-    )
-    st.divider()
-
-    if validacao is None or validacao.empty:
-        st.info("Execute src/validacao_hardware.py para habilitar os exemplos ilustrativos.")
-        return
-
-    original = original.copy()
-    original["perfil_numero"] = original["cluster"].map(mapa_perfil)
-
-    st.markdown("##### Exemplos ilustrativos por perfil")
-    st.caption(
-        "Um exemplo por perfil, escolhido para tornar a narrativa concreta -- nao "
-        "uma amostra representativa nem um resultado estatistico (ver aviso acima: "
-        "nenhuma relacao real entre os dois conjuntos de dados existe nesta PoC)."
-    )
-
-    cand1 = original[original["perfil_numero"] == 1]
-    if not cand1.empty:
-        apolice1 = cand1.sort_values(["valor_pago_historico", "classe_risco"], ascending=False).iloc[0]
-        trajetos1 = validacao[validacao["comportamento"] == "agressiva"]
-        if trajetos1.empty:
-            trajetos1 = validacao
-        trajeto1 = trajetos1.sort_values(
-            ["eventos_por_min", "magnitude_maxima_ms2"], ascending=False
-        ).iloc[0]
-        render_exemplo_perfil(
-            1, apolice1, trajeto1,
-            "Narrativa ilustrativa: se o dispositivo ESP32 desta frota (ja "
-            "sinalizada como alto risco pela segmentacao historica) registrasse "
-            "um trajeto com esta taxa de eventos, esse sumario "
-            "reforcaria/confirmaria a classificacao existente (Secao 3.4.1)."
-        )
-
-    cand2 = original[original["perfil_numero"] == 2]
-    if not cand2.empty:
-        apolice2 = cand2.sort_values(["qt_coberturas_ativas", "lmi_por_veiculo"], ascending=False).iloc[0]
-        trajetos2 = validacao[validacao["comportamento"] == "normal"]
-        if trajetos2.empty:
-            trajetos2 = validacao
-        trajeto2 = trajetos2.sort_values("magnitude_maxima_ms2", ascending=True).iloc[0]
-        render_exemplo_perfil(
-            2, apolice2, trajeto2,
-            "Narrativa ilustrativa: um trajeto sem sinal de conducao agressiva "
-            "reforcaria a leitura de baixo risco ja indicada pela alta cobertura "
-            "e baixo custo historico desta apolice -- consistente com a manutencao "
-            "de condicoes comerciais favoraveis."
-        )
-
-    cand3 = original[original["perfil_numero"] == 3]
-    if not cand3.empty:
-        apolice3 = cand3.sort_values(["tempo_cotacao_emissao", "referral_pendente"], ascending=False).iloc[0]
-        mediana_magnitude = validacao["magnitude_maxima_ms2"].median()
-        trajeto3 = validacao.loc[(validacao["magnitude_maxima_ms2"] - mediana_magnitude).abs().idxmin()]
-        render_exemplo_perfil(
-            3, apolice3, trajeto3,
-            "Narrativa ilustrativa: cotacoes em referral ou conversao tardia ainda "
-            "nao tem um padrao comportamental estabelecido -- um primeiro trajeto "
-            "real, agressivo ou nao, teria peso desproporcional em reduzir essa "
-            "incerteza, ao contrario dos Perfis 1 e 2, onde a evidencia historica ja "
-            "aponta uma direcao."
-        )
-
-
-def render_view_exportar():
-    arquivos = {
-        "Matriz original com rotulos de cluster": "matriz_original_clusters.csv",
-        "Matriz normalizada com rotulos de cluster": "matriz_normalizada_clusters.csv",
-        "Estatisticas descritivas por cluster": "perfis_estatisticas_descritivas.csv",
-        "Testes de significancia por variavel": "perfis_testes_significancia.csv",
-        "Curva de validacao de k (cotovelo/silhouette)": "validacao_k.csv",
-        "Resumo por trajeto (UAH-DriveSet)": "validacao_hardware_uah_driveset.csv",
-        "Checagens de calibracao do sinal (UAH-DriveSet)": "validacao_hardware_uah_calibracao.csv",
-        "Confundimento motorista x comportamento x via (UAH-DriveSet)": "validacao_hardware_uah_confundimento.csv",
-    }
-    for titulo, nome_arquivo in arquivos.items():
-        caminho = DADOS_DIR / nome_arquivo
-        if not caminho.exists():
+    Eixo Y em log de proposito: a primeira classe concentra a maior parte das
+    amostras e, em escala linear, a cauda -- justamente onde os limiares
+    cortam -- fica invisivel."""
+    fig = go.Figure()
+    for comportamento in ORDEM_COMPORTAMENTO:
+        sub = histograma[histograma["comportamento"] == comportamento].sort_values("classe_idx")
+        if sub.empty:
             continue
-        with st.container(border=True):
-            col_desc, col_botao = st.columns([3, 1])
-            col_desc.markdown(f"**{titulo}**  \n`{nome_arquivo}`")
-            col_botao.download_button(
-                "Baixar CSV", data=caminho.read_bytes(), file_name=nome_arquivo,
-                mime="text/csv", key=f"download_{nome_arquivo}", width="stretch",
+        centro = (sub["classe_min"] + sub["classe_max"]) / 2
+        cor, rgb = CORES_COMPORTAMENTO[comportamento]
+        fig.add_trace(go.Scatter(
+            x=centro, y=sub["n_amostras"].clip(lower=1),
+            fill="tozeroy", mode="lines", name=comportamento.capitalize(),
+            line=dict(color=cor, width=3, shape="spline"),
+            fillcolor=f"rgba({rgb},0.18)",
+            hovertemplate="%{y:,.0f} amostras perto de %{x:.2f} m/s²<extra>"
+                          + comportamento.capitalize() + "</extra>",
+        ))
+
+    # Os dois rotulos saem para lados opostos da propria linha: ancorados no
+    # topo, eles caiam por cima da legenda e o do firmware era cortado pela
+    # borda direita da area de plotagem.
+    marcas = [(limiar, "#7c3aed", f"limiar do firmware · {_br(limiar, 0)} m/s²", "top left")]
+    if limiar_recal is not None:
+        marcas.append((limiar_recal, "#6b7280",
+                       f"recalibrado · {_br(limiar_recal)} m/s²", "top right"))
+    for valor, cor, rotulo, posicao in marcas:
+        fig.add_vline(x=valor, line_dash="dash", line_color=cor, line_width=2,
+                      annotation_text=rotulo, annotation_position=posicao,
+                      annotation_font=dict(size=11, color=cor))
+
+    fig.update_layout(
+        xaxis=dict(showgrid=False, title="Magnitude da aceleração (m/s²)"),
+        yaxis=dict(showgrid=True, gridcolor="#e5e7eb", type="log",
+                   title="Amostras (escala log)"),
+        legend=dict(orientation="h", yanchor="bottom", y=1.06, xanchor="left", x=0, title=""),
+    )
+    return _layout_plotly(fig, 380)
+
+
+def render_tab_hardware(limiar: float):
+    h1, h2, h3, h4 = st.columns(4)
+    _hw_card(h1, "🔧", "Microcontrolador", "ESP32 Dual-Core")
+    _hw_card(h2, "📈", "Acelerômetro MPU-6050", "Amostragem 50Hz")
+    _hw_card(h3, "📡", "Transmissão (store-and-forward)", "Wi-Fi / MQTT QoS 1")
+    _hw_card(h4, "🌱", "Eficiência Green IT", "Filtragem na borda (LittleFS)")
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    histograma = carregar_histograma()
+    limiar_recal = carregar_limiar_recalibrado(limiar)
+
+    col_area, col_alertas = st.columns([1.5, 1])
+
+    with col_area:
+        _titulo_secao(
+            "Assinatura inercial (magnitude da aceleração)",
+            f"Densidade das 311 mil leituras do acelerômetro no {FONTE_CITACAO}, "
+            "em escala log — a primeira classe concentra a maior parte das amostras "
+            "e, no eixo linear, a cauda onde os limiares cortam fica invisível. "
+            "A cauda da condução agressiva se estende muito além da normal, mas "
+            "termina bem antes do limiar programado no firmware.",
+        )
+        if histograma is None:
+            st.info(
+                "Rode `python src/validacao_hardware.py` para gerar o histograma "
+                "de amostras e esta figura aparece.", icon="ℹ️",
+            )
+        else:
+            st.plotly_chart(
+                fig_assinatura_inercial(histograma, limiar, limiar_recal),
+                use_container_width=True,
             )
 
+    with col_alertas:
+        _titulo_secao(
+            "O que o firmware registra, por faixa",
+            "Faixas de magnitude do sinal medido — não classificação de segurado: "
+            "o detector não decide perfil nem preço.",
+        )
+        faixas = (contagem_por_faixa(limiar, limiar_recal)
+                  if limiar_recal is not None else None)
+        if faixas is None or not faixas["n_total"]:
+            st.info("Rode `python src/validacao_hardware.py` para gerar as contagens.",
+                    icon="ℹ️")
+        else:
+            n_total = faixas["n_total"]
+            st.markdown(
+                _alert_box(
+                    "alert-good", "✅", f"Sem evento (abaixo de {_br(limiar_recal)} m/s²)",
+                    f"{_br(100 * faixas['n_abaixo_recal'] / n_total)}% das amostras "
+                    f"({_int_br(faixas['n_abaixo_recal'])} de {_int_br(n_total)}). "
+                    "Nenhum dos dois limiares dispara aqui.",
+                )
+                + _alert_box(
+                    "alert-warn", "⚠️",
+                    f"Zona intermediária ({_br(limiar_recal)} a {_br(limiar, 0)} m/s²)",
+                    f"{_br(100 * faixas['n_entre'] / n_total, 2)}% das amostras "
+                    f"({_int_br(faixas['n_entre'])}). Só seria registrada se o "
+                    f"THRESH_MAG_MS2 fosse recalibrado para {_br(limiar_recal)}.",
+                )
+                + _alert_box(
+                    "alert-bad", "⛔", f"Evento registrado (acima de {_br(limiar, 0)} m/s²)",
+                    f"Apenas {_int_br(faixas['n_acima_vigente'])} amostra(s) em "
+                    f"{_int_br(n_total)} cruzam o limiar vigente — a contagem de "
+                    "eventos por minuto fica zerada em quase toda a base.",
+                ),
+                unsafe_allow_html=True,
+            )
+
+    st.markdown(
+        '<div class="nota-integridade">'
+        "<b>O que esta aba é e o que não é.</b> É uma checagem de discriminação da "
+        "regra de detecção que roda no firmware contra um dataset público de "
+        "condução, rotulado por trajeto — não é medição de sonolência, não é "
+        "precisão por evento e não tem poder estatístico de validação. A análise "
+        "metodológica completa (régua da literatura, curva de sensibilidade, "
+        "varredura de calibração e efeito pareado por motorista) continua em "
+        "<code>dashboard/tab_validacao_hardware.py</code>. "
+        f"Dados: {FONTE_CITACAO} — acelerômetro a 10Hz, rótulo por trajeto; os "
+        "códigos D1–D6 são do próprio dataset e não identificam pessoas."
+        "</div>",
+        unsafe_allow_html=True,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Aba 3 -- Integracao UBI: coligacao conceitual das duas camadas
+# ---------------------------------------------------------------------------
+
+def fig_radar_perfis(variaveis: list, medias: pd.DataFrame) -> go.Figure:
+    eixos = [ROTULO_VARIAVEL.get(v, v) for v in variaveis]
+    fig = go.Figure()
+    for perfil in (2, 1):
+        if perfil not in medias.index:
+            continue
+        valores = medias.loc[perfil, variaveis].tolist()
+        cor = CORES_PERFIL[perfil]
+        rgb = {1: "239,68,68", 2: "16,185,129"}[perfil]
+        fig.add_trace(go.Scatterpolar(
+            r=valores + valores[:1], theta=eixos + eixos[:1],
+            fill="toself", name=NOME_CURTO[perfil],
+            line=dict(color=cor), fillcolor=f"rgba({rgb},0.35)",
+            hovertemplate="%{theta}: %{r:.0f}/100<extra>" + NOME_CURTO[perfil] + "</extra>",
+        ))
+    fig.update_layout(
+        polar=dict(
+            radialaxis=dict(visible=True, range=[0, 100], showticklabels=False,
+                            gridcolor="#e5e7eb"),
+            angularaxis=dict(gridcolor="#e5e7eb"),
+            bgcolor="rgba(0,0,0,0)",
+        ),
+        legend=dict(orientation="h", yanchor="bottom", y=-0.18, xanchor="center", x=0.5),
+        margin=dict(l=60, r=60, t=30, b=30),
+    )
+    return _layout_plotly(fig, 400)
+
+
+def render_tab_hibrido(normalizada, significancia, mapa_perfil):
+    col_radar, col_texto = st.columns([1, 1])
+
+    with col_radar:
+        _titulo_secao(
+            "Raio-X multidimensional do segurado",
+            "As 6 variáveis que mais separam os perfis (menor p-valor nos testes de "
+            "significância), na média normalizada Min-Max do próprio K-Means, "
+            "reescalada a 0–100. São dados declaratórios/históricos da Parte A — "
+            "nenhuma leitura de telemetria entra neste radar. O Perfil 2 aparece "
+            "quase colado no centro porque pontua baixo justamente nas variáveis "
+            "que mais discriminam: isso é o resultado, não falha da figura.",
+        )
+        if significancia is None or significancia.empty:
+            st.info("Rode `python src/perfilamento.py` para gerar os testes de "
+                    "significância.", icon="ℹ️")
+        else:
+            variaveis, medias = calcular_radar_perfis(normalizada, significancia, mapa_perfil)
+            st.plotly_chart(fig_radar_perfis(variaveis, medias), use_container_width=True)
+
+    with col_texto:
+        st.markdown(
+            '<div class="card-texto">'
+            '<h4 style="color:#6d28d9;margin-top:0;">⚡ Matriz de transição dinâmica</h4>'
+            '<p style="color:#4b5563;font-size:14.5px;line-height:1.6;">'
+            "O diferencial previsto para esta arquitetura é transformar a fotografia "
+            "estática da cotação em um <b>filme dinâmico</b>: a telemetria gerada na "
+            "borda (ESP32) corrigiria as distorções da declaração inicial. As duas "
+            "transições abaixo são o desenho da Seção 3.4.1."
+            "</p>"
+            '<div style="display:flex;flex-direction:column;gap:18px;margin-top:18px;">'
+            '<div style="display:flex;gap:14px;align-items:flex-start;">'
+            '<div style="background:#d1fae5;padding:9px;border-radius:8px;font-size:18px;">🛡️</div>'
+            '<div><strong style="color:#065f46;display:block;margin-bottom:3px;">'
+            "Referral → Desconto</strong>"
+            '<span style="color:#4b5563;font-size:13.5px;">Cliente sem histórico '
+            "(Perfil 3) aceita a instalação do dispositivo como condição de emissão; "
+            "a conduta observada sustentaria a migração para o Perfil 2.</span></div></div>"
+            '<div style="display:flex;gap:14px;align-items:flex-start;">'
+            '<div style="background:#fee2e2;padding:9px;border-radius:8px;font-size:18px;">📉</div>'
+            '<div><strong style="color:#991b1b;display:block;margin-bottom:3px;">'
+            "Desconto → Agravo</strong>"
+            '<span style="color:#4b5563;font-size:13.5px;">Frota cuja má gestão '
+            "operacional não aparece na declaração (Perfil 2 aparente): eventos "
+            "inerciais recorrentes justificariam a reclassificação para o Perfil 1, "
+            "sempre com decisão humana no circuito.</span></div></div>"
+            "</div></div>",
+            unsafe_allow_html=True,
+        )
+
+    st.markdown("<br>", unsafe_allow_html=True)
+    st.markdown(
+        '<div class="nota-integridade">'
+        "<b>Não existe junção real entre as duas camadas nesta PoC.</b> As apólices "
+        "são sintéticas e o dataset de condução é público: não há motorista, veículo "
+        "ou vínculo contratual em comum entre eles, e nenhuma correlação foi calculada "
+        "entre as duas bases. O radar acima usa exclusivamente dados da Parte A "
+        "(segmentação); a matriz de transição descreve a arquitetura prevista no texto "
+        "do TCC — token pseudônimo por frota, ingestão que só enxerga o token e "
+        "reassociação restrita à seguradora (LGPD, minimização de dados) — e não um "
+        "resultado medido. A classificação permanece apoio à decisão, com humano no "
+        "circuito (LGPD, Art. 20)."
+        "</div>",
+        unsafe_allow_html=True,
+    )
+
+
+# ---------------------------------------------------------------------------
 
 def main():
-    st.set_page_config(page_title="Segmentacao RCT", layout="wide")
+    st.set_page_config(
+        page_title="Dashboard Seguros IoT", page_icon="🛡️",
+        layout="wide", initial_sidebar_state="collapsed",
+    )
     aplicar_estilo()
-    view = render_sidebar()
 
-    col_titulo, col_badge = st.columns([4, 1])
+    col_titulo, col_badge = st.columns([5, 1])
     with col_titulo:
-        st.title("Segmentacao de Transportadoras - Produto RCT")
-        st.caption(
-            "Dashboard de visualizacao e validacao dos resultados da segmentacao por "
-            "K-Means (Parte A) e da camada de telemetria embarcada (Parte B)."
+        st.markdown(
+            '<h1 style="color:#4c1d95;font-size:2.1rem;font-weight:800;margin-bottom:0;">'
+            "🛡️ Dashboard Seguros IoT</h1>"
+            '<p style="color:#6b7280;font-size:1.05rem;margin-top:5px;">'
+            "Plataforma híbrida de validação de risco: K-Means (software) + "
+            "UBI edge computing (hardware) &middot; Produto RCT Transportador</p>",
+            unsafe_allow_html=True,
         )
     with col_badge:
         st.markdown(
-            '<div style="text-align:right;padding-top:18px;">'
-            '<span class="pill-badge">Dados sinteticos (PoC)</span></div>',
+            '<div style="text-align:right;padding-top:22px;">'
+            '<span class="badge badge-violet">Dados sintéticos (PoC)</span></div>',
             unsafe_allow_html=True,
         )
 
     if not (DADOS_DIR / "matriz_normalizada_clusters.csv").exists():
         st.error(
-            "Nenhum resultado de clusterizacao encontrado em data/processed/. "
+            "Nenhum resultado de clusterização encontrado em data/processed/. "
             "Execute src/preprocessamento.py e src/clustering.py antes de abrir o dashboard."
         )
         return
@@ -934,38 +711,34 @@ def main():
     normalizada, original = carregar_dados()
     mapa_perfil = mapear_cluster_para_perfil(original)
     kpis_cluster = calcular_kpis_por_cluster(original, mapa_perfil)
-    gerais = calcular_kpis_gerais(original)
     significancia = carregar_significancia()
-    validacao_k = carregar_validacao_k()
-    validacao_uah = carregar_validacao_uah()
+    gerais = {
+        "n_apolices": len(original),
+        "premio_por_veiculo_medio": original["premio_por_veiculo"].mean(),
+        "taxa_referral": original["referral_pendente"].mean(),
+    }
 
     projecao, variancia_pct = projetar_pca(normalizada)
-    projecao = projecao.merge(
-        original[["numeroApolice", "classe_risco", "premio_por_veiculo",
-                  "valor_pago_historico", "referral_pendente", "tempo_cotacao_emissao"]],
-        on="numeroApolice", how="left",
-    )
     projecao["perfil_numero"] = projecao["cluster"].map(mapa_perfil)
-    projecao["nome_perfil"] = projecao["perfil_numero"].map(NOME_PERFIL)
+    projecao["perfil_curto"] = projecao["perfil_numero"].map(NOME_CURTO)
 
-    if view == "Segmentacao":
-        render_view_segmentacao(
-            projecao, variancia_pct, kpis_cluster, gerais, significancia, normalizada, validacao_k,
-            original, mapa_perfil,
-        )
-    elif view == "Validacao de Hardware":
-        render_specs_hardware()
-        render(carregar("data/processed/uah_trips.csv"), limiar=THRESH_MAG_MS2)
-    elif view == "Coligacao Conceitual":
-        render_view_coligacao(original, mapa_perfil, validacao_uah, normalizada, significancia)
-
-    with st.expander("Exportar dados"):
-        render_view_exportar()
+    aba_software, aba_hardware, aba_hibrido = st.tabs([
+        "📊 Software (K-Means)",
+        "⚙️ Hardware (IoT Edge)",
+        "⚡ Integração UBI (Híbrido)",
+    ])
+    with aba_software:
+        render_tab_software(projecao, kpis_cluster, gerais, variancia_pct)
+    with aba_hardware:
+        render_tab_hardware(THRESH_MAG_MS2)
+    with aba_hibrido:
+        render_tab_hibrido(normalizada, significancia, mapa_perfil)
 
     st.markdown(
-        '<div style="text-align:center;color:#65596f;font-size:11px;margin-top:24px;">'
-        "Erika Oliveira Silva &middot; Centro Universitario Senac Santo Amaro &middot; "
-        "Validacao: Silhouette, Davies-Bouldin e Calinski-Harabasz</div>",
+        '<div style="text-align:center;color:#9ca3af;font-size:11.5px;margin-top:28px;">'
+        "Erika Oliveira Silva &middot; Centro Universitário Senac Santo Amaro &middot; "
+        "Segmentação validada por Silhouette, Davies-Bouldin e Calinski-Harabasz "
+        "(ver src/clustering.py)</div>",
         unsafe_allow_html=True,
     )
 
