@@ -39,16 +39,19 @@ import pandas as pd
 import streamlit as st
 
 from .charts_validacao import (
-    G, LIT, ESTILOS,
-    fig1_escala_do_limiar, fig2_pico_por_estilo, fig3_sensibilidade,
+    G, LIT, ESTILOS, CORES, LARGURA_FIGURA,
+    fig1_escala_do_limiar, fig3_sensibilidade,
     fig4_delta_por_motorista, fig5_antes_depois, fig6_grade_calibracao,
     tabela_cobertura,
 )
+from .histograma_didatico import histograma_por_perfil, int_ptbr
 
 COLUNAS = ["trajeto_id", "motorista", "estilo", "via",
            "duracao_min", "pico_ms2", "eventos", "eventos_min"]
 
 CAMINHO_GRADE = "data/processed/grade_calibracao.csv"
+CAMINHO_HISTOGRAMA = "data/processed/validacao_hardware_uah_histograma.csv"
+CAMINHO_LIMIARES = "data/processed/validacao_hardware_uah_limiares.csv"
 
 RAIZ_PROJETO = Path(__file__).resolve().parent.parent
 
@@ -70,6 +73,60 @@ def carregar_grade(caminho: str = CAMINHO_GRADE) -> pd.DataFrame | None:
     if not alvo.is_absolute():
         alvo = RAIZ_PROJETO / alvo
     return pd.read_csv(alvo) if alvo.exists() else None
+
+
+def carregar_histograma(caminho: str = CAMINHO_HISTOGRAMA) -> pd.DataFrame | None:
+    """Classes do histograma de amostras (311 mil leituras do acelerometro a
+    10Hz), uma linha por comportamento x tipo_via x classe -- agregada aqui
+    somando os dois tipos de via, porque esta figura compara comportamento,
+    nao via. Vem de src/validacao_hardware.py; None se ainda nao foi gerada."""
+    alvo = Path(caminho)
+    if not alvo.is_absolute():
+        alvo = RAIZ_PROJETO / alvo
+    if not alvo.exists():
+        return None
+    df = pd.read_csv(alvo)
+    return df.groupby(["comportamento", "classe_idx"], as_index=False).agg(
+        classe_min=("classe_min", "first"), classe_max=("classe_max", "first"),
+        n_amostras=("n_amostras", "sum"),
+    )
+
+
+def carregar_limiar_recalibrado(limiar_vigente: float,
+                                caminho: str = CAMINHO_LIMIARES) -> float | None:
+    """O outro limiar avaliado por src/validacao_hardware.py (p99,9 da
+    condução normal) -- lido do CSV que o proprio pipeline gerou, nunca
+    recalculado aqui, para nao divergir do numero que ele imprime."""
+    alvo = Path(caminho)
+    if not alvo.is_absolute():
+        alvo = RAIZ_PROJETO / alvo
+    if not alvo.exists():
+        return None
+    df = pd.read_csv(alvo)
+    outros = df.loc[df["limiar_ms2"] != limiar_vigente, "limiar_ms2"]
+    return float(outros.iloc[0]) if not outros.empty else None
+
+
+def contagem_por_faixa(limiar_vigente: float, limiar_recalibrado: float,
+                       caminho: str = CAMINHO_LIMIARES) -> dict | None:
+    """Quantas das 311 mil amostras caem abaixo do recalibrado, entre os dois
+    limiares, e acima do vigente -- somado dos n_acima/n_total que
+    src/validacao_hardware.py ja calculou por comportamento x via (nunca
+    reimplementado aqui a partir do sinal bruto)."""
+    alvo = Path(caminho)
+    if not alvo.is_absolute():
+        alvo = RAIZ_PROJETO / alvo
+    if not alvo.exists():
+        return None
+    df = pd.read_csv(alvo)
+    n_total = int(df.loc[df["limiar_ms2"] == limiar_vigente, "n_total"].sum())
+    n_acima_vigente = int(df.loc[df["limiar_ms2"] == limiar_vigente, "n_acima"].sum())
+    n_acima_recal = int(df.loc[df["limiar_ms2"] == limiar_recalibrado, "n_acima"].sum())
+    n_entre = n_acima_recal - n_acima_vigente
+    return {
+        "n_total": n_total, "n_acima_vigente": n_acima_vigente, "n_entre": n_entre,
+        "n_abaixo_recal": n_total - n_acima_recal,
+    }
 
 
 def ponto_operacao(df: pd.DataFrame, sinalizado: pd.Series,
@@ -210,16 +267,66 @@ def render(df: pd.DataFrame, limiar: float) -> None:
 
     # ---------------------------------------------------------------- 04
     st.subheader("04 · O sinal existe — o limiar é que não o alcança")
-    st.altair_chart(fig2_pico_por_estilo(df, limiar), width="content")
-    st.caption(
-        "**Figura 2.** A barra é a mediana do pico daquele rótulo, com o valor escrito e o n "
-        "no rótulo da linha; os pontos cinza sobre cada barra são os trajetos que entraram "
-        "nela. As linhas estão ordenadas da menor para a maior mediana, e a marca à direita é "
-        "o limiar do firmware — a distância até ela é o segundo achado da figura. "
-        "Sonolenta acima de agressiva não é erro de pipeline: condução sonolenta "
-        "produz correções tardias de trajetória — desvios bruscos de volante e frenagens de "
-        "recuperação — que a magnitude sem decomposição por eixo registra igual a uma frenagem forte."
-    )
+    histograma = carregar_histograma()
+    limiar_recal = carregar_limiar_recalibrado(limiar)
+    if histograma is None:
+        st.info(
+            "Rode `python src/validacao_hardware.py` para gerar "
+            f"`{CAMINHO_HISTOGRAMA}` e esta figura aparece.", icon="ℹ️",
+        )
+    else:
+        limiares_fig = {f"limiar do firmware · {_br(limiar, 0)} m/s²": limiar}
+        if limiar_recal is not None:
+            limiares_fig[f"recalibrado (p99,9 normal) · {_br(limiar_recal)} m/s²"] = limiar_recal
+        st.altair_chart(
+            histograma_por_perfil(
+                histograma, coluna_grupo="comportamento", ordem=ESTILOS,
+                cores=dict(zip(ESTILOS, CORES)),
+                rotulo_x="Magnitude da aceleração (m/s²)", unidade="amostras",
+                limiares=limiares_fig, altura=120, largura=LARGURA_FIGURA,
+                escala_log=True, casas_classe=2, mostrar_contagem=False,
+            ),
+            width="content",
+        )
+        n_amostras_total = int(histograma["n_amostras"].sum())
+        st.caption(
+            f"**Figura 2.** As {int_ptbr(n_amostras_total)} leituras do acelerômetro a 10Hz "
+            "em todo o UAH-DriveSet — não mais um ponto por trajeto, um ponto por amostra —, "
+            "em escala log porque a primeira classe concentra a maioria delas. O sinal existe: "
+            "a cauda da distribuição agressiva se estende muito mais para a direita que a "
+            "normal. O que falta é o limiar chegar lá — a régua tracejada do firmware fica "
+            "bem depois de onde as três curvas já esvaziaram."
+        )
+
+        if limiar_recal is not None:
+            st.markdown(
+                "###### O que cada faixa de magnitude dispara hoje "
+                "(faixas do sinal — sem ligação com o perfil do segurado)"
+            )
+            faixas = contagem_por_faixa(limiar, limiar_recal)
+            if faixas is not None and faixas["n_total"]:
+                n_total = faixas["n_total"]
+                c1, c2, c3 = st.columns(3)
+                _cartao(
+                    c1, f"Abaixo de {_br(limiar_recal)} m/s² (p99,9 da condução normal)",
+                    "Nenhum limiar dispara", "#0ca30c",
+                    f"{_br(100 * faixas['n_abaixo_recal'] / n_total, 1)}% das amostras "
+                    f"({int_ptbr(faixas['n_abaixo_recal'])} de {int_ptbr(n_total)}).",
+                )
+                _cartao(
+                    c2, f"Entre {_br(limiar_recal)} e {_br(limiar, 0)} m/s²",
+                    "Só dispara no recalibrado", "#eb6834",
+                    f"{_br(100 * faixas['n_entre'] / n_total, 2)}% das amostras "
+                    f"({int_ptbr(faixas['n_entre'])}) — é o que mudaria se "
+                    f"THRESH_MAG_MS2 virasse {_br(limiar_recal)}.",
+                )
+                _cartao(
+                    c3, f"Acima de {_br(limiar, 0)} m/s² (limiar vigente)",
+                    "Dispara nos dois", "#8a4b12",
+                    f"Só {int_ptbr(faixas['n_acima_vigente'])} amostra(s) em "
+                    f"{int_ptbr(n_total)} cruzam o limiar vigente — a Figura 2 acima "
+                    "mostra a que rótulo elas pertencem.",
+                )
 
     # ---------------------------------------------------------------- 05
     st.subheader("05 · Que limiar você deveria escolher")
