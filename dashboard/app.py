@@ -39,8 +39,9 @@ sys.path.append(str(RAIZ / "src"))
 sys.path.append(str(RAIZ))
 from preprocessamento import COLUNAS_19  # noqa: E402
 from validacao_hardware import THRESH_MAG_MS2  # noqa: E402
+from validacao_hardware import ESPECIFICIDADE_MINIMA, _melhor_par  # noqa: E402
 from dashboard.tab_validacao_hardware import (  # noqa: E402
-    carregar_histograma, carregar_limiar_recalibrado, contagem_por_faixa,
+    carregar, carregar_grade, carregar_histograma, carregar_limiar_recalibrado,
 )
 
 DADOS_DIR = RAIZ / "data" / "processed"
@@ -490,6 +491,79 @@ def fig_assinatura_inercial(histograma: pd.DataFrame, limiar: float,
     return _layout_plotly(fig, 380)
 
 
+def render_classificacao_conduta(limiar: float):
+    """Good/bad behaviour por TRAJETO, no ponto de operacao que a varredura de
+    calibracao recomenda -- nao por amostra solta.
+
+    A classificacao nao e inventada aqui: o par (limiar, taxa minima) sai de
+    `_melhor_par` sobre a grade que src/validacao_hardware.py gerou, com o
+    mesmo piso de especificidade que o pipeline aplica. O que cada cartao
+    mostra e a COMPOSICAO do grupo sinalizado por rotulo do proprio dataset --
+    ou seja, o quanto a regra acerta -- e nao uma decisao comercial."""
+    _titulo_secao(
+        "Classificação de conduta (o que a regra sinaliza)",
+        "Verdicto por trajeto, não por amostra: o detector não decide perfil "
+        "nem preço — a leitura abaixo é o quanto a regra separa condução "
+        "agressiva de condução normal.",
+    )
+
+    grade = carregar_grade()
+    if grade is None:
+        st.info(
+            "Rode `python src/validacao_hardware.py` para gerar a grade de "
+            "calibração e esta classificação aparece.", icon="ℹ️",
+        )
+        return
+
+    candidatos = grade[grade["especificidade"] >= ESPECIFICIDADE_MINIMA]
+    rec = _melhor_par(candidatos if not candidatos.empty else grade).to_dict()
+
+    n_agr, agr_sin = int(rec["n_agressiva"]), int(rec["agressiva_sinalizados"])
+    n_nor, nor_sin = int(rec["n_normal"]), int(rec["normal_sinalizados"])
+    n_son, son_sin = int(rec["n_sonolenta"]), int(rec["sonolenta_sinalizados"])
+    nao_sinalizados = (n_agr + n_nor + n_son) - (agr_sin + nor_sin + son_sin)
+    n_trajetos = n_agr + n_nor + n_son
+
+    st.markdown(
+        _alert_box(
+            "alert-good", "✅", "Good behaviour (não sinalizado)",
+            f"{nao_sinalizados} dos {n_trajetos} trajetos não geram evento suficiente "
+            f"para disparar — entre eles {n_nor - nor_sin} dos {n_nor} normais "
+            f"({_br(100 * rec['especificidade'], 0)}% de especificidade). "
+            "É o grupo que a regra preserva.",
+        )
+        + _alert_box(
+            "alert-warn", "⚠️", "Meio termo (sonolência → análise humana)",
+            f"{son_sin} dos {n_son} trajetos rotulados sonolentos também disparam. "
+            "A magnitude sem decomposição por eixo registra correção tardia de "
+            "trajetória como frenagem forte: é caso de reavaliação humana, não de "
+            "agravo automático.",
+        )
+        + _alert_box(
+            "alert-bad", "⛔", "Bad behaviour (sinalizado)",
+            f"{agr_sin} dos {n_agr} trajetos agressivos são sinalizados "
+            f"({_br(100 * rec['sensibilidade'], 0)}% de sensibilidade), contra apenas "
+            f"{nor_sin} dos {n_nor} normais. Índice de Youden {_br(rec['youden'], 2)} "
+            "(0 seria não separar nada).",
+        ),
+        unsafe_allow_html=True,
+    )
+
+    trajetos = carregar()
+    acima_vigente = int((trajetos["pico_ms2"] >= limiar).sum())
+    st.markdown(
+        '<div class="nota-integridade" style="margin-top:6px;font-size:12.5px;">'
+        f"<b>Regra usada:</b> limiar de {_br(rec['limiar_ms2'])} m/s² com pelo menos "
+        f"{_br(rec['taxa_min_eventos_min'])} evento/min — o ponto de operação que a "
+        "varredura de calibração recomenda. "
+        f"<b>O limiar de {_br(limiar, 0)} m/s² que está hoje no firmware é cruzado "
+        f"por apenas {acima_vigente} dos {len(trajetos)} trajetos</b> — com ele a "
+        "classificação acima deixa de existir, e é isso que justifica a recalibração."
+        "</div>",
+        unsafe_allow_html=True,
+    )
+
+
 def render_tab_hardware(limiar: float):
     h1, h2, h3, h4 = st.columns(4)
     _hw_card(h1, "🔧", "Microcontrolador", "ESP32 Dual-Core")
@@ -525,40 +599,7 @@ def render_tab_hardware(limiar: float):
             )
 
     with col_alertas:
-        _titulo_secao(
-            "O que o firmware registra, por faixa",
-            "Faixas de magnitude do sinal medido — não classificação de segurado: "
-            "o detector não decide perfil nem preço.",
-        )
-        faixas = (contagem_por_faixa(limiar, limiar_recal)
-                  if limiar_recal is not None else None)
-        if faixas is None or not faixas["n_total"]:
-            st.info("Rode `python src/validacao_hardware.py` para gerar as contagens.",
-                    icon="ℹ️")
-        else:
-            n_total = faixas["n_total"]
-            st.markdown(
-                _alert_box(
-                    "alert-good", "✅", f"Sem evento (abaixo de {_br(limiar_recal)} m/s²)",
-                    f"{_br(100 * faixas['n_abaixo_recal'] / n_total)}% das amostras "
-                    f"({_int_br(faixas['n_abaixo_recal'])} de {_int_br(n_total)}). "
-                    "Nenhum dos dois limiares dispara aqui.",
-                )
-                + _alert_box(
-                    "alert-warn", "⚠️",
-                    f"Zona intermediária ({_br(limiar_recal)} a {_br(limiar, 0)} m/s²)",
-                    f"{_br(100 * faixas['n_entre'] / n_total, 2)}% das amostras "
-                    f"({_int_br(faixas['n_entre'])}). Só seria registrada se o "
-                    f"THRESH_MAG_MS2 fosse recalibrado para {_br(limiar_recal)}.",
-                )
-                + _alert_box(
-                    "alert-bad", "⛔", f"Evento registrado (acima de {_br(limiar, 0)} m/s²)",
-                    f"Apenas {_int_br(faixas['n_acima_vigente'])} amostra(s) em "
-                    f"{_int_br(n_total)} cruzam o limiar vigente — a contagem de "
-                    "eventos por minuto fica zerada em quase toda a base.",
-                ),
-                unsafe_allow_html=True,
-            )
+        render_classificacao_conduta(limiar)
 
     st.markdown(
         '<div class="nota-integridade">'
