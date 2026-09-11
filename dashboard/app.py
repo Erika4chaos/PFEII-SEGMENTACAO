@@ -152,6 +152,44 @@ def carregar_significancia():
     return pd.read_csv(caminho) if caminho.exists() else None
 
 
+@st.cache_data
+def carregar_resumo_uah():
+    """Resumo por trajeto do UAH-DriveSet, como src/validacao_hardware.py o
+    escreveu (uma linha por trajeto, com magnitude, velocidade e variacao de
+    curso). E a base do radar de conduta -- Parte B, sem nenhuma relacao com
+    as apolices da Parte A."""
+    caminho = DADOS_DIR / "validacao_hardware_uah_driveset.csv"
+    return pd.read_csv(caminho) if caminho.exists() else None
+
+
+# Eixos do radar de conduta: nome da coluna -> rotulo. `eventos_por_min` fica
+# de fora de proposito -- no limiar vigente ela e zero em quase todos os
+# trajetos e entraria como um eixo colado no centro, sem informacao.
+METRICAS_CONDUTA = {
+    "magnitude_media_ms2": "Magnitude média",
+    "magnitude_maxima_ms2": "Pico de magnitude",
+    "velocidade_media_kmh": "Velocidade média",
+    "velocidade_maxima_kmh": "Velocidade máxima",
+    "var_curso_media_abs": "Variação de curso",
+}
+
+
+def calcular_radar_conduta(resumo: pd.DataFrame):
+    """Media por rotulo comportamental das metricas de conduta, cada uma
+    normalizada Min-Max sobre os 40 trajetos e reescalada a 0-100.
+
+    Mesma receita do radar de perfis (normalizar, depois agrupar), o que
+    mantem as duas figuras lendo na mesma regua -- posicao relativa dentro da
+    propria base, nunca comparacao numerica entre as duas bases."""
+    dados = resumo.copy()
+    for coluna in METRICAS_CONDUTA:
+        minimo, maximo = dados[coluna].min(), dados[coluna].max()
+        dados[coluna] = (100 * (dados[coluna] - minimo) / (maximo - minimo)
+                         if maximo > minimo else 0.0)
+    medias = dados.groupby("comportamento")[list(METRICAS_CONDUTA)].mean()
+    return list(METRICAS_CONDUTA.values()), medias.rename(columns=METRICAS_CONDUTA)
+
+
 def projetar_pca(normalizada: pd.DataFrame) -> tuple[pd.DataFrame, float]:
     pca = PCA(n_components=2, random_state=42)
     componentes = pca.fit_transform(normalizada[COLUNAS_19])
@@ -693,8 +731,35 @@ def fig_radar_perfis(variaveis: list, medias: pd.DataFrame) -> go.Figure:
     return _layout_plotly(fig, 400)
 
 
+def fig_radar_conduta(eixos: list, medias: pd.DataFrame) -> go.Figure:
+    fig = go.Figure()
+    for comportamento in ORDEM_COMPORTAMENTO:
+        if comportamento not in medias.index:
+            continue
+        valores = medias.loc[comportamento, eixos].tolist()
+        cor, rgb = CORES_COMPORTAMENTO[comportamento]
+        fig.add_trace(go.Scatterpolar(
+            r=valores + valores[:1], theta=eixos + eixos[:1],
+            fill="toself", name=comportamento.capitalize(),
+            line=dict(color=cor), fillcolor=f"rgba({rgb},0.22)",
+            hovertemplate="%{theta}: %{r:.0f}/100<extra>"
+                          + comportamento.capitalize() + "</extra>",
+        ))
+    fig.update_layout(
+        polar=dict(
+            radialaxis=dict(visible=True, range=[0, 100], showticklabels=False,
+                            gridcolor="#e5e7eb"),
+            angularaxis=dict(gridcolor="#e5e7eb"),
+            bgcolor="rgba(0,0,0,0)",
+        ),
+        legend=dict(orientation="h", yanchor="bottom", y=-0.18, xanchor="center", x=0.5),
+        margin=dict(l=60, r=60, t=30, b=30),
+    )
+    return _layout_plotly(fig, 400)
+
+
 def render_tab_hibrido(normalizada, significancia, mapa_perfil):
-    col_radar, col_texto = st.columns([1, 1])
+    col_radar, col_conduta = st.columns([1, 1])
 
     with col_radar:
         _titulo_secao(
@@ -713,8 +778,26 @@ def render_tab_hibrido(normalizada, significancia, mapa_perfil):
             variaveis, medias = calcular_radar_perfis(normalizada, significancia, mapa_perfil)
             st.plotly_chart(fig_radar_perfis(variaveis, medias), use_container_width=True)
 
-    with col_texto:
-        st.markdown(
+    with col_conduta:
+        _titulo_secao(
+            f"Assinatura de conduta · {FONTE_CITACAO}",
+            "O mesmo tipo de leitura, do outro lado da arquitetura: cinco métricas "
+            "medidas em 40 trajetos reais, normalizadas na mesma régua 0–100. É esta "
+            "a evidência comportamental que, em produção, um dispositivo próprio "
+            "traria de volta — aqui ela vem de um dataset público, de motoristas "
+            "que não têm apólice nenhuma neste projeto.",
+        )
+        resumo = carregar_resumo_uah()
+        if resumo is None or resumo.empty:
+            st.info("Rode `python src/validacao_hardware.py` para gerar o resumo "
+                    "por trajeto do UAH-DriveSet.", icon="ℹ️")
+        else:
+            eixos, medias_conduta = calcular_radar_conduta(resumo)
+            st.plotly_chart(fig_radar_conduta(eixos, medias_conduta),
+                            use_container_width=True)
+
+    st.markdown("<br>", unsafe_allow_html=True)
+    st.markdown(
             '<div class="card-texto">'
             '<h4 style="color:#6d28d9;margin-top:0;">⚡ Matriz de transição dinâmica</h4>'
             '<p style="color:#4b5563;font-size:14.5px;line-height:1.6;">'
@@ -739,22 +822,27 @@ def render_tab_hibrido(normalizada, significancia, mapa_perfil):
             "operacional não aparece na declaração (Perfil 2 aparente): eventos "
             "inerciais recorrentes justificariam a reclassificação para o Perfil 1, "
             "sempre com decisão humana no circuito.</span></div></div>"
-            "</div></div>",
-            unsafe_allow_html=True,
-        )
+        "</div></div>",
+        unsafe_allow_html=True,
+    )
 
     st.markdown("<br>", unsafe_allow_html=True)
     st.markdown(
         '<div class="nota-integridade">'
-        "<b>Não existe junção real entre as duas camadas nesta PoC.</b> As apólices "
-        "são sintéticas e o dataset de condução é público: não há motorista, veículo "
-        "ou vínculo contratual em comum entre eles, e nenhuma correlação foi calculada "
-        "entre as duas bases. O radar acima usa exclusivamente dados da Parte A "
-        "(segmentação); a matriz de transição descreve a arquitetura prevista no texto "
-        "do TCC — token pseudônimo por frota, ingestão que só enxerga o token e "
-        "reassociação restrita à seguradora (LGPD, minimização de dados) — e não um "
-        "resultado medido. A classificação permanece apoio à decisão, com humano no "
-        "circuito (LGPD, Art. 20)."
+        "<b>Por que são dois radares, e não um só.</b> Um radar único, com eixos "
+        "declaratórios e eixos de telemetria lado a lado, afirmaria que aquele "
+        "segurado tem aquela condução medida — e esse vínculo não existe nesta PoC. "
+        "As apólices são sintéticas (geradas para este trabalho) e os trajetos são de "
+        "um dataset público de motoristas que não têm apólice nenhuma aqui: não há "
+        "chave, motorista, veículo ou vínculo contratual em comum, e nenhuma "
+        "correlação foi calculada entre as duas bases. Cada radar é normalizado "
+        "dentro da própria base, então a leitura válida é a forma de cada polígono, "
+        "nunca a comparação numérica de um eixo contra o outro. "
+        "A matriz de transição acima descreve a arquitetura prevista no texto do TCC "
+        "— token pseudônimo por frota, ingestão que só enxerga o token e reassociação "
+        "restrita à seguradora (LGPD, minimização de dados) — e não um resultado "
+        "medido. A classificação permanece apoio à decisão, com humano no circuito "
+        "(LGPD, Art. 20)."
         "</div>",
         unsafe_allow_html=True,
     )
