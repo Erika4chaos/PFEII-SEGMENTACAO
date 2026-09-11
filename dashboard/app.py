@@ -59,6 +59,8 @@ NOME_CURTO = {
     3: "3 - Risco Incerto (Referral)",
 }
 
+CARTEIRA_COMPLETA = "Carteira completa"
+
 # Paleta de risco (vermelho/verde/ambar), escolhida pela autora no desenho do
 # painel: a cor carrega o significado de negocio, o que ajuda a leitura pela
 # banca. Substitui a paleta roxo/azul/verde anterior, que era validada para
@@ -223,6 +225,22 @@ def aplicar_estilo():
             border-color: #7c3aed;
         }
 
+        /* Filtro por perfil (st.pills) no tom das abas. Os dois seletores
+           cobrem as duas formas que o Streamlit ja usou para marcar a pilula
+           selecionada (kind="pillsActive" e aria-checked). */
+        button[kind="pills"], button[kind="pillsActive"] {
+            border-radius: 999px !important;
+            border: 1px solid #ddd6fe !important;
+            color: #6d28d9 !important;
+            background-color: #ffffff !important;
+            font-weight: 600;
+        }
+        button[kind="pillsActive"], button[kind="pills"][aria-checked="true"] {
+            background-color: #7c3aed !important;
+            border-color: #7c3aed !important;
+            color: #ffffff !important;
+        }
+
         .kpi-card {
             background-color: white;
             border: 1px solid #e5e7eb;
@@ -372,15 +390,34 @@ def _layout_plotly(fig: go.Figure, altura: int) -> go.Figure:
 # ---------------------------------------------------------------------------
 
 def render_tab_software(projecao, kpis_cluster, gerais, variancia_pct):
-    linha_p1 = kpis_cluster[kpis_cluster["perfil_numero"] == 1]
-    custo_p1 = float(linha_p1["valor_pago_historico_medio"].iloc[0]) if not linha_p1.empty else 0.0
+    # Filtro por perfil: os quatro KPIs, a nuvem do PCA e a linha destacada da
+    # tabela respondem juntos a esta selecao, para analisar um perfil de cada vez.
+    perfis_disponiveis = sorted(int(n) for n in kpis_cluster["perfil_numero"])
+    opcoes = [CARTEIRA_COMPLETA] + [NOME_CURTO[n] for n in perfis_disponiveis]
+    escolha = st.pills("Analisar", opcoes, default=CARTEIRA_COMPLETA,
+                       key="filtro_perfil") or CARTEIRA_COMPLETA
+    perfil_sel = next((n for n in perfis_disponiveis if NOME_CURTO[n] == escolha), None)
+
+    if perfil_sel is None:
+        linha_p1 = kpis_cluster[kpis_cluster["perfil_numero"] == 1]
+        n_base, rotulo_base = gerais["n_apolices"], "Base analisada"
+        premio = gerais["premio_por_veiculo_medio"]
+        referral = gerais["taxa_referral"]
+        custo = float(linha_p1["valor_pago_historico_medio"].iloc[0]) if not linha_p1.empty else 0.0
+        rotulo_custo = "Custo médio (Perfil 1)"
+    else:
+        linha = kpis_cluster[kpis_cluster["perfil_numero"] == perfil_sel].iloc[0]
+        n_base, rotulo_base = linha["n_apolices"], f"Apólices do Perfil {perfil_sel}"
+        premio = linha["premio_por_veiculo_medio"]
+        referral = linha["taxa_referral"]
+        custo = linha["valor_pago_historico_medio"]
+        rotulo_custo = f"Custo médio (Perfil {perfil_sel})"
 
     c1, c2, c3, c4 = st.columns(4)
-    _kpi_card(c1, "👥", "Base analisada", _int_br(gerais["n_apolices"]), "apólices")
-    _kpi_card(c2, "💰", "Prêmio médio / veículo",
-              _fmt_brl_compacto(gerais["premio_por_veiculo_medio"]), "por ano")
-    _kpi_card(c3, "⏳", "Taxa de referral", f"{_br(100 * gerais['taxa_referral'])}%")
-    _kpi_card(c4, "⚠️", "Custo médio (Perfil 1)", _fmt_brl_compacto(custo_p1), "/sinistro")
+    _kpi_card(c1, "👥", rotulo_base, _int_br(n_base), "apólices")
+    _kpi_card(c2, "💰", "Prêmio médio / veículo", _fmt_brl_compacto(premio), "por ano")
+    _kpi_card(c3, "⏳", "Taxa de referral", f"{_br(100 * referral)}%")
+    _kpi_card(c4, "⚠️", rotulo_custo, _fmt_brl_compacto(custo), "/sinistro")
 
     st.markdown("<br>", unsafe_allow_html=True)
 
@@ -404,6 +441,11 @@ def render_tab_software(projecao, kpis_cluster, gerais, variancia_pct):
             marker=dict(size=9, opacity=0.8),
             hovertemplate="Apólice %{customdata[0]}<extra></extra>",
         )
+        # Com um perfil escolhido, os outros dois ficam de fundo em vez de sumir:
+        # a posicao relativa das nuvens e metade da leitura da figura.
+        if perfil_sel is not None:
+            for traco in fig.data:
+                traco.marker.opacity = 0.9 if traco.name == NOME_CURTO[perfil_sel] else 0.12
         fig.update_layout(
             xaxis=dict(showgrid=False, zeroline=False, visible=False),
             yaxis=dict(showgrid=False, zeroline=False, visible=False),
@@ -422,8 +464,10 @@ def render_tab_software(projecao, kpis_cluster, gerais, variancia_pct):
         linhas = ""
         for _, linha in kpis_cluster.iterrows():
             perfil = int(linha["perfil_numero"])
+            destaque = (' style="background-color:#f5f3ff;box-shadow:inset 4px 0 0 #7c3aed;"'
+                        if perfil == perfil_sel else "")
             linhas += (
-                "<tr>"
+                f"<tr{destaque}>"
                 f'<td style="font-weight:600;color:#1f2937;">{NOME_CURTO[perfil]}</td>'
                 f'<td>{_int_br(linha["n_apolices"])} apólices</td>'
                 f'<td>{_fmt_brl_compacto(linha["lmi_por_veiculo_medio"])}</td>'
