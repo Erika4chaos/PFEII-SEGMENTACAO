@@ -26,6 +26,8 @@ scipy>=1.10,<2
 matplotlib>=3.7,<4
 seaborn>=0.12,<1
 streamlit>=1.40,<2
-altair>=5.0,<6
+# altair 5.x quebra no Python 3.14 (TypedDict com closed=), que e a versao
+# usada hoje pelo Streamlit Cloud; a 6.x e a primeira compativel.
+altair>=6.0,<7
 plotly>=5.18,<7
 Faker>=19.0,<41
