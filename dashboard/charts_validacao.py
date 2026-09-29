@@ -143,7 +143,7 @@ def fig1_escala_do_limiar(df: pd.DataFrame, limiar: float,
         {"v": LIT["tipico"], "cor": TINTA2,
          "t": f"mais usado na literatura · {LIT['tipico'] / G:.2f} g".replace(".", ",")},
         {"v": limiar, "cor": DESTAQUE,
-         "t": f"limiar do firmware · {limiar:.0f} m/s² = {limiar / G:.2f} g".replace(".", ",")},
+         "t": f"limiar do firmware · {limiar:.1f} m/s² = {limiar / G:.2f} g".replace(".", ",")},
     ])
 
     pontos = alt.Chart(df.assign(faixa=df["estilo"].map(rot))).mark_circle(
@@ -238,7 +238,7 @@ def fig3_sensibilidade(df: pd.DataFrame, limiar: float,
         color=DESTAQUE, strokeWidth=2.5).encode(
         x=alt.X("v:Q", scale=escala_x, axis=eixo_x))
     rot_atual = alt.Chart(pd.DataFrame({
-        "v": [limiar], "t": [f"limiar atual · {limiar:.0f} m/s²".replace(".", ",")],
+        "v": [limiar], "t": [f"limiar atual · {limiar:.1f} m/s²".replace(".", ",")],
     })).mark_text(align="right", dx=-8, baseline="middle", fontSize=11.5,
                   fontWeight="bold", color=DESTAQUE).encode(
         x=alt.X("v:Q", scale=escala_x, axis=eixo_x), y=alt.datum(96), text="t:N")

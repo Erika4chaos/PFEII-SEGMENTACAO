@@ -40,7 +40,7 @@ RAIZ = Path(__file__).resolve().parent.parent
 sys.path.append(str(RAIZ / "src"))
 sys.path.append(str(RAIZ))
 from preprocessamento import COLUNAS_19, COLUNAS_MODELO  # noqa: E402
-from validacao_hardware import THRESH_MAG_MS2  # noqa: E402
+from validacao_hardware import THRESH_MAG_MS2, THRESH_MAG_ANTERIOR_MS2  # noqa: E402
 from validacao_hardware import ESPECIFICIDADE_MINIMA, _melhor_par  # noqa: E402
 from validacao_hardware import (  # noqa: E402
     _perfil_deteccao, _taxa_eventos, listar_trajetos,
@@ -709,24 +709,39 @@ def render_tab_software(projecao, kpis_cluster, gerais, variancia_pc):
 UAH_DIR = RAIZ / "data" / "raw" / "uah-driveset"
 
 
-def ponto_operacao_recomendado() -> dict | None:
-    """Par (limiar, taxa minima) que a varredura de calibracao recomenda --
-    `_melhor_par` sobre a grade que src/validacao_hardware.py gerou, com o
-    mesmo piso de especificidade do pipeline. E a UNICA fonte do limiar
-    recalibrado nesta aba: o grafico e os cartoes leem daqui, para nao
-    voltarem a mostrar dois numeros diferentes (2,9 no grafico, que era o
-    p99,9 da conducao normal, e 2,3 nos cartoes)."""
-    grade = carregar_grade()
-    if grade is None:
-        return None
+def _melhor_com_piso(grade: pd.DataFrame) -> dict:
+    """`_melhor_par` com o mesmo piso de especificidade que o pipeline aplica."""
     candidatos = grade[grade["especificidade"] >= ESPECIFICIDADE_MINIMA]
     return _melhor_par(candidatos if not candidatos.empty else grade).to_dict()
 
 
+def ponto_operacao_firmware(limiar: float) -> dict | None:
+    """Metricas da regra no limiar QUE ESTA GRAVADO NO FIRMWARE.
+
+    A aba mostra o que o dispositivo faz, e nao o melhor par da varredura: o
+    limiar e LIMIAR_MAGNITUDE_MS2 do config.h (lido por src/validacao_hardware.py)
+    e, dentro dele, a taxa minima de eventos/min vem da grade com o piso de
+    especificidade do pipeline. Antes a aba classificava com o otimo da grade
+    e desenhava "firmware atual 6 m/s²" -- dois numeros que nenhum dispositivo
+    real estava usando."""
+    grade = carregar_grade()
+    if grade is None:
+        return None
+    no_limiar = grade[(grade["limiar_ms2"] - limiar).abs() < 1e-6]
+    return _melhor_com_piso(no_limiar) if not no_limiar.empty else None
+
+
+def otimo_da_varredura() -> dict | None:
+    """Melhor par da grade inteira -- evidencia para a decisao de limiar, nao
+    a regra em uso."""
+    grade = carregar_grade()
+    return _melhor_com_piso(grade) if grade is not None else None
+
+
 @st.cache_data
 def carregar_trajetos_classificados(limiar_rec: float, taxa_min: float) -> pd.DataFrame | None:
-    """Um registro por trajeto: rotulo, pico, eventos/min no limiar
-    recomendado e se a regra o sinaliza.
+    """Um registro por trajeto: rotulo, pico, eventos/min no limiar do
+    firmware e se a regra o sinaliza.
 
     A taxa por trajeto nao e reimplementada aqui: sai de `_perfil_deteccao` e
     `_taxa_eventos`, as mesmas funcoes que montam a grade de calibracao, entao
@@ -748,15 +763,15 @@ def carregar_trajetos_classificados(limiar_rec: float, taxa_min: float) -> pd.Da
     return pd.DataFrame(linhas)
 
 
-def fig_pico_por_trajeto(trajetos: pd.DataFrame, limiar: float,
-                         limiar_rec: float, taxa_min: float) -> go.Figure:
+def fig_pico_por_trajeto(trajetos: pd.DataFrame, limiar_rec: float,
+                         limiar_anterior: float, limiar_otimo: float | None) -> go.Figure:
     """Um ponto por trajeto (n=40), no pico de magnitude, com os dois limiares.
 
     Substitui a densidade das 311 mil amostras: os cartoes ao lado classificam
     TRAJETOS, e uma figura por amostra nao sustentava essa leitura. Ponto cheio
-    = trajeto sinalizado pela regra recomendada; ponto vazado = nao sinalizado.
-    O eixo vai alem de 6 m/s² para que o limiar do firmware fique dentro da
-    area de plotagem, com a cauda inteira visivel."""
+    = trajeto sinalizado pela regra do firmware; ponto vazado = nao sinalizado.
+    O eixo vai alem de 6 m/s² para que o limiar anterior fique dentro da area
+    de plotagem, com a cauda inteira visivel."""
     fig = go.Figure()
     ordem_y = list(reversed(ORDEM_COMPORTAMENTO))  # normal no topo
     rng = np.random.default_rng(7)
@@ -792,11 +807,13 @@ def fig_pico_por_trajeto(trajetos: pd.DataFrame, limiar: float,
         )
 
     marcas = [
-        (limiar_rec, "#6b7280", f"recalibrado · {_br(limiar_rec)} m/s²"),
-        (limiar, "#7c3aed", f"firmware atual · {_br(limiar, 0)} m/s²"),
+        (limiar_rec, "#7c3aed", "dash", f"firmware · {_br(limiar_rec)} m/s²"),
+        (limiar_anterior, "#9ca3af", "dot", f"limiar anterior · {_br(limiar_anterior, 0)} m/s²"),
     ]
-    for valor, cor, rotulo in marcas:
-        fig.add_vline(x=valor, line_dash="dash", line_color=cor, line_width=2,
+    if limiar_otimo is not None and abs(limiar_otimo - limiar_rec) > 1e-6:
+        marcas.append((limiar_otimo, "#6b7280", "dot", f"ótimo da varredura · {_br(limiar_otimo)}"))
+    for valor, cor, traco, rotulo in marcas:
+        fig.add_vline(x=valor, line_dash=traco, line_color=cor, line_width=2,
                       annotation_text=rotulo, annotation_position="top",
                       annotation_font=dict(size=11, color=cor))
 
@@ -856,8 +873,8 @@ def _matriz_confusao_html(rec: dict) -> str:
     )
 
 
-def render_classificacao_conduta(limiar: float, rec: dict | None):
-    """Resultado por TRAJETO, no ponto de operacao que a varredura recomenda.
+def render_classificacao_conduta(limiar: float, rec: dict | None, otimo: dict | None):
+    """Resultado por TRAJETO, no ponto de operacao do firmware.
 
     A matriz rotulo x saida e a leitura principal; os tres cartoes viraram
     texto de apoio curto, um por linha da matriz."""
@@ -901,15 +918,39 @@ def render_classificacao_conduta(limiar: float, rec: dict | None):
     )
 
     trajetos = carregar()
-    acima_vigente = int((trajetos["pico_ms2"] >= limiar).sum())
+    acima_anterior = int((trajetos["pico_ms2"] >= THRESH_MAG_ANTERIOR_MS2).sum())
+    regra = (f"pelo menos um evento acima de {_br(rec['limiar_ms2'])} m/s²"
+             if rec["taxa_min_eventos_min"] <= 0 else
+             f"mais de {_br(rec['taxa_min_eventos_min'])} evento/min acima de "
+             f"{_br(rec['limiar_ms2'])} m/s²")
+    texto_otimo = ""
+    if otimo is not None and abs(otimo["limiar_ms2"] - rec["limiar_ms2"]) > 1e-6:
+        texto_otimo = (
+            f" <b>A varredura encontra um par melhor nesta amostra</b> "
+            f"({_br(otimo['limiar_ms2'])} m/s², mais de "
+            f"{_br(otimo['taxa_min_eventos_min'])} evento/min: Youden "
+            f"{_br(otimo['youden'], 2)}), mas medido nos mesmos 40 trajetos que o "
+            "escolheram."
+        )
+        lodo_csv = DADOS_DIR / "validacao_hardware_uah_lodo.csv"
+        if lodo_csv.exists():
+            lodo = pd.read_csv(lodo_csv)
+            sens, espec = lodo["sensibilidade_teste"], lodo["especificidade_teste"]
+            texto_otimo += (
+                f" Refeito deixando um motorista de fora por vez ({len(lodo)} rodadas), "
+                f"a sensibilidade fica entre {_br(100 * sens.min(), 0)}% e "
+                f"{_br(100 * sens.max(), 0)}% (mediana {_br(100 * sens.median(), 0)}%) e a "
+                f"especificidade entre {_br(100 * espec.min(), 0)}% e "
+                f"{_br(100 * espec.max(), 0)}% (mediana {_br(100 * espec.median(), 0)}%)."
+            )
+        texto_otimo += " Trocar o limiar é decisão de projeto, não ajuste de tela."
     st.markdown(
         '<div class="nota-integridade" style="margin-top:6px;font-size:12.5px;">'
-        f"<b>Regra usada:</b> limiar de {_br(rec['limiar_ms2'])} m/s² com mais de "
-        f"{_br(rec['taxa_min_eventos_min'])} evento/min — o ponto de operação que a "
-        "varredura de calibração recomenda. "
-        f"<b>O limiar de {_br(limiar, 0)} m/s² que está hoje no firmware é cruzado "
-        f"por apenas {acima_vigente} dos {len(trajetos)} trajetos</b> — com ele a "
-        "classificação acima deixa de existir, e é isso que justifica a recalibração."
+        f"<b>Regra do firmware:</b> um trajeto é sinalizado com {regra} — o "
+        f"limiar é o <code>LIMIAR_MAGNITUDE_MS2</code> gravado no ESP32, o p99,9 da "
+        f"condução normal deste dataset. O limiar anterior, "
+        f"{_br(THRESH_MAG_ANTERIOR_MS2, 0)} m/s², era cruzado por apenas "
+        f"{acima_anterior} dos {len(trajetos)} trajetos.{texto_otimo}"
         "</div>",
         unsafe_allow_html=True,
     )
@@ -925,7 +966,8 @@ def render_tab_hardware(limiar: float):
 
     st.markdown("<br>", unsafe_allow_html=True)
 
-    rec = ponto_operacao_recomendado()
+    rec = ponto_operacao_firmware(limiar)
+    otimo = otimo_da_varredura()
     col_area, col_alertas = st.columns([1.5, 1])
 
     trajetos = (carregar_trajetos_classificados(float(rec["limiar_ms2"]),
@@ -937,11 +979,9 @@ def render_tab_hardware(limiar: float):
         _titulo_secao(
             "Pico de aceleração por trajeto",
             f"Cada ponto é um dos {n_traj} trajetos do {FONTE_CITACAO}, na maior magnitude "
-            "que ele registrou. Ponto cheio: a regra recomendada sinaliza o trajeto; "
-            "vazado: não sinaliza — cruzar o limiar recalibrado uma vez não basta, a regra "
-            "pede leituras acima dele com frequência (ver a regra usada, ao lado). "
-            "À direita do limiar atual do firmware quase não há pontos: com ele, "
-            "praticamente nenhum trajeto dispararia.",
+            "que ele registrou. Ponto cheio: a regra do firmware sinaliza o trajeto; "
+            "vazado: não sinaliza. À direita do limiar anterior (6 m/s²) quase não "
+            "há pontos — era por isso que o dispositivo antigo nunca disparava.",
         )
         if trajetos is None or trajetos.empty:
             st.info(
@@ -950,8 +990,9 @@ def render_tab_hardware(limiar: float):
             )
         else:
             st.plotly_chart(
-                fig_pico_por_trajeto(trajetos, limiar, float(rec["limiar_ms2"]),
-                                     float(rec["taxa_min_eventos_min"])),
+                fig_pico_por_trajeto(trajetos, float(rec["limiar_ms2"]),
+                                     THRESH_MAG_ANTERIOR_MS2,
+                                     float(otimo["limiar_ms2"]) if otimo else None),
                 use_container_width=True,
             )
             st.markdown(
@@ -964,7 +1005,7 @@ def render_tab_hardware(limiar: float):
             )
 
     with col_alertas:
-        render_classificacao_conduta(limiar, rec)
+        render_classificacao_conduta(limiar, rec, otimo)
 
     st.markdown(
         '<div class="nota-integridade">'

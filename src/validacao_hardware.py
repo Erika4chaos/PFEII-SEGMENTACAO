@@ -2,7 +2,8 @@
 validacao_hardware.py
 
 Valida a logica de deteccao de eventos do modulo ESP32 (Secao 2.8): o
-limiar de magnitude da aceleracao (~6 m/s^2) e aplicado sobre o
+limiar de magnitude da aceleracao do firmware (LIMIAR_MAGNITUDE_MS2, lido de
+firmware/esp32/include/config.h; 2,9 m/s^2 desde 23/09/2026) e aplicado sobre o
 UAH-DriveSet (ROMERA; BERGASA; ARROYO, 2016) e a taxa de eventos por minuto
 resultante e confrontada, por ANOVA, com o rotulo comportamental conhecido
 de cada trajeto (normal / agressiva / sonolenta).
@@ -52,7 +53,8 @@ no texto do TCC. Nao e o firmware inteiro que esta validado aqui:
     ja entrega filtrado por Kalman e sem gravidade.
 
 (b) CRITERIO DE JERK. O firmware registra evento por
-        magnitude > 6,0  OU  (|jerk| > 20 E magnitude > 3,0)
+        magnitude > LIMIAR_MAGNITUDE_MS2  OU
+        (|jerk| > LIMIAR_JERK_MS3 E magnitude > PISO_MAGNITUDE_JERK_MS2)
     -- o jerk e auxiliar e exige um piso de aceleracao real junto (ver
     PISO_MAGNITUDE_JERK_MS2 em firmware/esp32/include/config.h). Aqui a
     deteccao usa SOMENTE a magnitude; o jerk e calculado e persistido para
@@ -61,8 +63,10 @@ no texto do TCC. Nao e o firmware inteiro que esta validado aqui:
     O piso tornou as duas regras mais proximas do que eram: como o jerk
     sozinho nao dispara mais, o caminho dominante do firmware passou a ser o
     mesmo que esta validado aqui. A diferenca remanescente e que o firmware
-    pode registrar um evento com magnitude entre 3,0 e 6,0 quando o jerk for
-    alto -- casos que esta validacao, por ser so de magnitude, nao conta.
+    pode registrar um evento com magnitude entre o piso do jerk e o limiar
+    principal quando o jerk for alto -- casos que esta validacao, por ser so
+    de magnitude, nao conta. Os tres valores sao lidos do config.h do
+    firmware (ver _ler_define_firmware), nunca repetidos aqui.
 
 (c) TAXA DE AMOSTRAGEM. O dataset e amostrado a ~10 Hz e o firmware a 50 Hz. A
     contagem de eventos aqui agrupa travessias do limiar dentro do mesmo
@@ -108,7 +112,7 @@ ser tirada sem checar essa tabela.
 
 Uso:
     python src/validacao_hardware.py
-    python src/validacao_hardware.py --dataset-dir data/raw/uah-driveset --limiar 6.0
+    python src/validacao_hardware.py --dataset-dir data/raw/uah-driveset --limiar 2.9
 """
 
 import argparse
@@ -120,12 +124,41 @@ import pandas as pd
 from scipy.stats import f_oneway
 
 G_MS2 = 9.80665  # 1 G em m/s^2
-# Limiar de magnitude do firmware (Secao 2.8), em m/s^2. E a UNICA definicao
-# desse valor no projeto: o dashboard importa esta constante em vez de repetir
-# o numero, e main() ainda aceita --limiar para varrer outros valores sem
-# editar codigo. 6,0 m/s^2 = 0,61 G -- ver a Figura 1 da aba de validacao para
-# onde isso cai na regua da literatura.
-THRESH_MAG_MS2 = 6.0
+CONFIG_FIRMWARE = (Path(__file__).resolve().parent.parent
+                   / "firmware" / "esp32" / "include" / "config.h")
+
+
+def _ler_define_firmware(nome: str, padrao: float) -> float:
+    """Le um `#define NOME valor` do config.h do firmware.
+
+    O limiar e o periodo refratario existem nos dois lados -- no ESP32 e nesta
+    validacao -- e ja divergiram uma vez (o firmware passou para 2,9 m/s^2 em
+    23/09/2026 e este modulo continuou em 6,0, sem nenhum aviso). Lendo do
+    config.h, o firmware passa a ser a UNICA fonte do numero. `padrao` so vale
+    quando o arquivo nao existe (copia do projeto sem a pasta firmware/)."""
+    try:
+        texto = CONFIG_FIRMWARE.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return padrao
+    achado = re.search(rf"^\s*#define\s+{nome}\s+([0-9.]+)f?\b", texto, re.MULTILINE)
+    return float(achado.group(1)) if achado else padrao
+
+
+# Limiar de magnitude do firmware, em m/s^2 (LIMIAR_MAGNITUDE_MS2 no config.h).
+# E a UNICA definicao desse valor no lado Python: o dashboard importa esta
+# constante em vez de repetir o numero, e main() ainda aceita --limiar para
+# varrer outros valores sem editar codigo. Desde 23/09/2026 o firmware usa
+# 2,9 m/s^2 (~0,30 g), o p99,9 da magnitude em conducao normal deste dataset.
+THRESH_MAG_MS2 = _ler_define_firmware("LIMIAR_MAGNITUDE_MS2", 2.9)
+
+# Limiar anterior (Secao 2.8, MASELLO et al., 2025), mantido so como
+# referencia historica nas figuras: 6,0 m/s^2 = 0,61 g, praticamente
+# inalcancavel -- 1 dos 40 trajetos o cruza.
+THRESH_MAG_ANTERIOR_MS2 = 6.0
+
+# Piso de magnitude exigido junto do criterio de jerk no firmware -- lido para
+# que os textos do dashboard descrevam a regra que o ESP32 realmente aplica.
+PISO_MAGNITUDE_JERK_MS2 = _ler_define_firmware("PISO_MAGNITUDE_JERK_MS2", 1.45)
 
 ACC_COLUNAS = [
     "timestamp", "ativo_v50",
@@ -235,7 +268,7 @@ def calcular_magnitude_ms2(df_acc: pd.DataFrame) -> pd.Series:
 # AMOSTRAGEM em vez do comportamento. Isso importa especialmente aqui: o
 # UAH-DriveSet e amostrado a ~10 Hz e o firmware a 50 Hz, entao a contagem por
 # amostra isolada nao seria comparavel entre os dois.
-REFRATARIO_S = 2.0
+REFRATARIO_S = _ler_define_firmware("INTERVALO_MIN_ENTRE_EVENTOS_MS", 2000.0) / 1000.0
 
 
 def contar_eventos_agrupados(magnitude: np.ndarray, timestamp: np.ndarray,
@@ -466,7 +499,10 @@ def avaliar_limiares(magnitudes: pd.DataFrame, limiares: list) -> pd.DataFrame:
 # entre condutores -- misturar os tres rotulos faria a sensibilidade medir duas
 # coisas diferentes ao mesmo tempo. A taxa de sinalizacao de sonolenta e
 # reportada em colunas proprias, para inspecao, sem entrar em Youden.
-GRADE_LIMIAR_MS2 = np.round(np.arange(1.5, 4.001, 0.1), 2)
+# A grade comecava em 1,5 m/s^2 e o melhor par caia exatamente nessa borda --
+# sinal de que o otimo podia estar abaixo e nao estava sendo testado. Estendida
+# para 1,0 para que o ponto escolhido seja interior a faixa varrida.
+GRADE_LIMIAR_MS2 = np.round(np.arange(1.0, 4.001, 0.1), 2)
 GRADE_TAXA_MIN = np.round(np.arange(0.0, 2.001, 0.1), 2)
 
 ESPECIFICIDADE_MINIMA = 0.85
@@ -579,7 +615,7 @@ def _melhor_par(grade: pd.DataFrame) -> pd.Series:
 
 def avaliar_par(raiz: Path, limiar_ms2: float, taxa_minima: float) -> pd.Series:
     """Mesmas metricas da grade para UM par arbitrario. Existe para avaliar o
-    limiar vigente (T=6,0, N=0), que fica fora da faixa varrida."""
+    limiar anterior (T=6,0, N=0), que fica fora da faixa varrida."""
     grade = varrer_calibracao(raiz, limiares=[limiar_ms2], taxas=[taxa_minima])
     return grade.iloc[0]
 
@@ -883,17 +919,23 @@ def main():
     magnitudes = coletar_magnitudes(dataset_dir)
     limiar_recalibrado = derivar_limiar_recalibrado(magnitudes)
     print(f"{len(magnitudes):,} amostras a ~10 Hz")
-    print(f"Limiar da literatura: {args.limiar} m/s^2 | "
-          f"limiar recalibrado (p99.9 da conducao normal): {limiar_recalibrado} m/s^2")
+    print(f"Limiar do firmware: {args.limiar} m/s^2 | "
+          f"p99.9 da conducao normal: {limiar_recalibrado} m/s^2 | "
+          f"limiar anterior: {THRESH_MAG_ANTERIOR_MS2} m/s^2")
+    if abs(limiar_recalibrado - THRESH_MAG_MS2) > 0.05:
+        print(f"AVISO: o p99.9 da conducao normal ({limiar_recalibrado}) nao bate com "
+              f"LIMIAR_MAGNITUDE_MS2 do firmware ({THRESH_MAG_MS2}). Um dos dois mudou; "
+              "firmware e validacao deixaram de estar no mesmo ponto de operacao.")
 
     histograma = construir_histograma_magnitude(magnitudes)
     histograma.to_csv(saida_dir / "validacao_hardware_uah_histograma.csv", index=False)
 
-    limiares = avaliar_limiares(magnitudes, [args.limiar, limiar_recalibrado])
+    limiares_avaliados = sorted({float(args.limiar), float(THRESH_MAG_ANTERIOR_MS2)})
+    limiares = avaliar_limiares(magnitudes, limiares_avaliados)
     limiares.to_csv(saida_dir / "validacao_hardware_uah_limiares.csv", index=False)
 
     print("\n% de amostras acima de cada limiar (todas as vias):")
-    for limiar in [args.limiar, limiar_recalibrado]:
+    for limiar in limiares_avaliados:
         print(f"  limiar {limiar} m/s^2:")
         for comportamento, grupo in magnitudes.groupby("comportamento"):
             n_acima = int((grupo["magnitude_ms2"] > limiar).sum())
@@ -959,13 +1001,17 @@ def main():
         print("   " + _formatar_par(_melhor_par(restrita)))
 
     print()
-    print("3. Limiar vigente, para comparacao (fora da faixa varrida)")
+    print(f"3. Limiar do firmware ({THRESH_MAG_MS2} m/s^2, qualquer evento sinaliza)")
     print("   " + _formatar_par(avaliar_par(dataset_dir, THRESH_MAG_MS2, 0.0)))
 
     print()
+    print(f"4. Limiar anterior, para comparacao historica (fora da faixa varrida)")
+    print("   " + _formatar_par(avaliar_par(dataset_dir, THRESH_MAG_ANTERIOR_MS2, 0.0)))
+
+    print()
     print(f"Grade completa salva em: {caminho_grade}")
-    print("THRESH_MAG_MS2 permanece em "
-          f"{THRESH_MAG_MS2} m/s^2 -- esta rodada so gera a evidencia.")
+    print(f"THRESH_MAG_MS2 = {THRESH_MAG_MS2} m/s^2, lido de {CONFIG_FIRMWARE.name} -- "
+          "para mudar o limiar, edite LIMIAR_MAGNITUDE_MS2 no firmware e rode de novo.")
 
 if __name__ == "__main__":
     main()

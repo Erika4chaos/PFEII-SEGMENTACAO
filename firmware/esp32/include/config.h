@@ -1,8 +1,9 @@
 #pragma once
 
-// Parametros do no de telemetria (Secao B). Limiares e taxas replicam os
-// valores usados em src/validacao_hardware.py para que o firmware e a
-// validacao contra o UAH-DriveSet fiquem comparaveis.
+// Parametros do no de telemetria (Secao B). Este arquivo e a fonte UNICA do
+// limiar de magnitude e do periodo refratario: src/validacao_hardware.py le
+// os dois daqui, para que firmware e validacao contra o UAH-DriveSet nao
+// voltem a divergir.
 
 // --- Fisica ---
 #define G_MS2 9.80665f  // 1 G em m/s^2
@@ -47,11 +48,10 @@
 // simples de defender, em vez de um valor ajustado para maximizar metrica,
 // que seria sujeito a sobreajuste com n = 40 trajetos.
 //
-// PENDENTE, e nao pode ser esquecido: THRESH_MAG_MS2 em
-// src/validacao_hardware.py continua em 6,0, e os CSVs de data/processed/
-// foram gerados com esse valor. Alinhar os dois exige reprocessar a validacao
-// com o UAH-DriveSet baixado, o que so da para fazer na maquina que tem o
-// dataset. Ate la, firmware e validacao NAO estao no mesmo ponto de operacao.
+// ALINHADO em 29/09/2026: src/validacao_hardware.py passou a LER este valor
+// (e INTERVALO_MIN_ENTRE_EVENTOS_MS) deste arquivo, em vez de manter uma copia
+// propria. Firmware, validacao e dashboard usam o mesmo limiar; para muda-lo,
+// edite so aqui e rode `python src/validacao_hardware.py` de novo.
 #define LIMIAR_MAGNITUDE_MS2 2.9f
 #define LIMIAR_JERK_MS3 20.0f               // limiar auxiliar sobre a derivada da magnitude
 

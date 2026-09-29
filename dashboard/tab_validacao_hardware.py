@@ -17,8 +17,10 @@ Referências das faixas da Figura 1 (todas em desaceleração brusca):
   * padrões DOT: 0,25–0,78 g para veículos de passeio; ~0,20 g para pesados;
   * Desai et al. e Mahmud & Day: ~0,27 g;
   * Kamla et al. (frota mista, Reino Unido): ~0,23 g pesados, ~0,45 g leves.
-O limiar do projeto (6 m/s² = 0,61 g) vem da Seção 2.8 do relatório
-(MASELLO et al., 2025; BRÜHWILER et al., 2022).
+O limiar do firmware (LIMIAR_MAGNITUDE_MS2 no config.h, hoje 2,9 m/s² ≈ 0,30 g,
+o p99,9 da condução normal do UAH-DriveSet) chega aqui como parâmetro. O limiar
+anterior (6 m/s² = 0,61 g, Seção 2.8; MASELLO et al., 2025; BRÜHWILER et al.,
+2022) aparece só como referência histórica.
 
 Uso:
     from validacao_hardware import THRESH_MAG_MS2
@@ -62,6 +64,9 @@ RAIZ_PROJETO = Path(__file__).resolve().parent.parent
 if str(RAIZ_PROJETO / "src") not in sys.path:
     sys.path.append(str(RAIZ_PROJETO / "src"))
 from validacao_hardware import ESPECIFICIDADE_MINIMA, _melhor_par  # noqa: E402
+from validacao_hardware import (  # noqa: E402
+    PISO_MAGNITUDE_JERK_MS2, THRESH_MAG_ANTERIOR_MS2,
+)
 
 
 def carregar_grade(caminho: str = CAMINHO_GRADE) -> pd.DataFrame | None:
@@ -133,9 +138,8 @@ def ponto_operacao(df: pd.DataFrame, sinalizado: pd.Series,
                    limiar: float, taxa_minima: float) -> dict:
     """Mesmas metricas da grade, para um par que nao esta nela.
 
-    Serve ao limiar vigente: ele fica fora da faixa varrida (1,5 a 4,0 m/s²),
-    entao o numero de comparacao e calculado aqui, a partir da coluna `eventos`
-    que o proprio pipeline gerou naquele limiar."""
+    Serve ao limiar do firmware com N = 0 (qualquer evento sinaliza), a partir
+    da coluna `eventos` que o proprio pipeline gerou naquele limiar."""
     agressiva = df["estilo"] == "agressiva"
     normal = df["estilo"] == "normal"
     n_agressiva, n_normal = int(agressiva.sum()), int(normal.sum())
@@ -212,17 +216,20 @@ def render(df: pd.DataFrame, limiar: float) -> None:
         f"{_br(med.get('agressiva', float('nan')))} m/s². n = {n_total} trajetos.",
     )
     _cartao(
-        c2, "Com o limiar atual, o dispositivo registraria esses eventos?",
+        c2, "Com o limiar do firmware, o dispositivo registraria esses eventos?",
         "Quase nunca" if acima <= n_total * 0.1 else "Em parte", "#eb6834",
-        f"{acima} de {n_total} trajetos chegam a {_br(limiar, 0)} m/s². "
-        f"A métrica de produto — eventos/min — fica em zero em {_br(pct_zero, 0)}% da base.",
+        f"{acima} de {n_total} trajetos chegam a {_br(limiar)} m/s². "
+        f"A métrica de produto — eventos/min — fica em zero em {_br(pct_zero, 0)}% da base. "
+        f"No limiar anterior ({_br(THRESH_MAG_ANTERIOR_MS2, 0)} m/s²), "
+        f"{int((df['pico_ms2'] >= THRESH_MAG_ANTERIOR_MS2).sum())} de {n_total}.",
     )
     _cartao(
         c3, "Isso já serve para alimentar precificação por uso?",
         "Ainda não", "#eb6834",
-        f"Antes é preciso recalibrar o limiar para a faixa da literatura de "
-        f"veículos pesados ({_br(LIT['pesado_lo'])}–{_br(LIT['pesado_hi'])} m/s²) "
-        "e refazer a contagem.",
+        "A base é de carros de passeio, com 40 trajetos e 6 motoristas. Falta a "
+        "coleta com o dispositivo instalado em caminhão, a frota que a apólice "
+        f"cobre — cuja literatura trabalha em {_br(LIT['pesado_lo'])}–"
+        f"{_br(LIT['pesado_hi'])} m/s².",
     )
 
     # ---------------------------------------------------------------- 02
@@ -244,10 +251,12 @@ def render(df: pd.DataFrame, limiar: float) -> None:
         ("pico do trajeto", "O maior valor dessa magnitude no trajeto inteiro. Um número por "
                             "trajeto. É a régua das Figuras 1, 2 e 4."),
         ("limiar", f"O valor de magnitude a partir do qual o firmware chama a leitura de "
-                   f"evento. Hoje: {_br(limiar, 0)} m/s². Não é constante da física — é "
+                   f"evento. Hoje: {_br(limiar)} m/s² (antes, {_br(THRESH_MAG_ANTERIOR_MS2, 0)}). "
+                   "Não é constante da física — é "
                    "escolha de projeto, e é ela que está em teste aqui."),
-        ("evento", f"No firmware: magnitude acima de {_br(limiar, 0)} m/s², **ou** variação "
-                   "brusca dessa magnitude (jerk) acompanhada de pelo menos 3,0 m/s² de "
+        ("evento", f"No firmware: magnitude acima de {_br(limiar)} m/s², **ou** variação "
+                   "brusca dessa magnitude (jerk) acompanhada de pelo menos "
+                   f"{_br(PISO_MAGNITUDE_JERK_MS2, 2)} m/s² de "
                    "aceleração real — o jerk é critério auxiliar e não dispara sozinho, "
                    "justamente para que um solavanco isolado não vire evento de condução. "
                    "Nesta validação conta-se apenas o critério de magnitude. É a única "
@@ -266,27 +275,30 @@ def render(df: pd.DataFrame, limiar: float) -> None:
     st.subheader("03 · Onde o limiar caiu na régua da literatura")
     st.altair_chart(fig1_escala_do_limiar(df, limiar), width="content")
     st.caption(
-        f"**Figura 1.** {_br(limiar, 0)} m/s² equivalem a {_br(limiar / G, 2)} g. "
-        "Para caminhões pesados — a frota que esta apólice cobre — os estudos de telemática "
-        "trabalham entre 0,20 e 0,23 g; as revisões de veículos de passeio usam de 0,25 a "
-        "0,78 g, com a maioria dos trabalhos perto de 0,27 g. O limiar do projeto está no topo "
-        "dessa amplitude e cerca de três vezes acima da referência de veículo pesado — o que "
-        "explica, sozinho, por que a contagem de eventos zera."
+        f"**Figura 1.** O limiar do firmware, {_br(limiar)} m/s², equivale a "
+        f"{_br(limiar / G, 2)} g. Para caminhões pesados — a frota que esta apólice cobre — "
+        "os estudos de telemática trabalham entre 0,20 e 0,23 g; as revisões de veículos de "
+        "passeio usam de 0,25 a 0,78 g, com a maioria dos trabalhos perto de 0,27 g. O limiar "
+        "atual cai logo acima dessa referência de passeio e ainda acima da de veículo pesado. "
+        f"O anterior, {_br(THRESH_MAG_ANTERIOR_MS2, 0)} m/s² "
+        f"({_br(THRESH_MAG_ANTERIOR_MS2 / G, 2)} g), ficava no topo da amplitude e cerca de "
+        "três vezes acima da referência de pesado — o que explicava a contagem zerada."
     )
 
     # ---------------------------------------------------------------- 04
-    st.subheader("04 · O sinal existe — o limiar é que não o alcança")
+    st.subheader("04 · O sinal existe — o limiar anterior é que não o alcançava")
     histograma = carregar_histograma()
-    limiar_recal = carregar_limiar_recalibrado(limiar)
+    limiar_ant = THRESH_MAG_ANTERIOR_MS2
     if histograma is None:
         st.info(
             "Rode `python src/validacao_hardware.py` para gerar "
             f"`{CAMINHO_HISTOGRAMA}` e esta figura aparece.", icon="ℹ️",
         )
     else:
-        limiares_fig = {f"limiar do firmware · {_br(limiar, 0)} m/s²": limiar}
-        if limiar_recal is not None:
-            limiares_fig[f"recalibrado (p99,9 normal) · {_br(limiar_recal)} m/s²"] = limiar_recal
+        limiares_fig = {
+            f"firmware (p99,9 normal) · {_br(limiar)} m/s²": limiar,
+            f"limiar anterior · {_br(limiar_ant, 0)} m/s²": limiar_ant,
+        }
         st.altair_chart(
             histograma_por_perfil(
                 histograma, coluna_grupo="comportamento", ordem=ESTILOS,
@@ -303,37 +315,37 @@ def render(df: pd.DataFrame, limiar: float) -> None:
             "em todo o UAH-DriveSet — não mais um ponto por trajeto, um ponto por amostra —, "
             "em escala log porque a primeira classe concentra a maioria delas. O sinal existe: "
             "a cauda da distribuição agressiva se estende muito mais para a direita que a "
-            "normal. O que falta é o limiar chegar lá — a régua tracejada do firmware fica "
-            "bem depois de onde as três curvas já esvaziaram."
+            "normal. O limiar anterior ficava depois de onde as três curvas já esvaziaram; "
+            "o do firmware corta justamente essa cauda."
         )
 
-        if limiar_recal is not None:
+        if True:
             st.markdown(
                 "###### O que cada faixa de magnitude dispara hoje "
                 "(faixas do sinal — sem ligação com o perfil do segurado)"
             )
-            faixas = contagem_por_faixa(limiar, limiar_recal)
+            faixas = contagem_por_faixa(limiar_ant, limiar)
             if faixas is not None and faixas["n_total"]:
                 n_total = faixas["n_total"]
                 c1, c2, c3 = st.columns(3)
                 _cartao(
-                    c1, f"Abaixo de {_br(limiar_recal)} m/s² (p99,9 da condução normal)",
+                    c1, f"Abaixo de {_br(limiar)} m/s² (limiar do firmware)",
                     "Nenhum limiar dispara", "#0ca30c",
                     f"{_br(100 * faixas['n_abaixo_recal'] / n_total, 1)}% das amostras "
                     f"({int_ptbr(faixas['n_abaixo_recal'])} de {int_ptbr(n_total)}).",
                 )
                 _cartao(
-                    c2, f"Entre {_br(limiar_recal)} e {_br(limiar, 0)} m/s²",
-                    "Só dispara no recalibrado", "#eb6834",
+                    c2, f"Entre {_br(limiar)} e {_br(limiar_ant, 0)} m/s²",
+                    "Só dispara no firmware atual", "#eb6834",
                     f"{_br(100 * faixas['n_entre'] / n_total, 2)}% das amostras "
-                    f"({int_ptbr(faixas['n_entre'])}) — é o que mudaria se "
-                    f"THRESH_MAG_MS2 virasse {_br(limiar_recal)}.",
+                    f"({int_ptbr(faixas['n_entre'])}) — é o que a troca de "
+                    f"{_br(limiar_ant, 0)} para {_br(limiar)} m/s² passou a detectar.",
                 )
                 _cartao(
-                    c3, f"Acima de {_br(limiar, 0)} m/s² (limiar vigente)",
+                    c3, f"Acima de {_br(limiar_ant, 0)} m/s² (limiar anterior)",
                     "Dispara nos dois", "#8a4b12",
                     f"Só {int_ptbr(faixas['n_acima_vigente'])} amostra(s) em "
-                    f"{int_ptbr(n_total)} cruzam o limiar vigente — a Figura 2 acima "
+                    f"{int_ptbr(n_total)} cruzam o limiar anterior — a Figura 2 acima "
                     "mostra a que rótulo elas pertencem.",
                 )
 
@@ -345,18 +357,19 @@ def render(df: pd.DataFrame, limiar: float) -> None:
     st.caption(
         "**Figura 3.** Cada curva responde: programando o firmware com este limiar, que fração "
         "dos trajetos daquele rótulo geraria pelo menos um evento? Um bom limiar é onde as "
-        "curvas se afastam — agressiva alta, normal perto do chão. No limiar atual as três já "
-        "colapsaram em zero e o detector deixa de discriminar. Na faixa da literatura "
+        "curvas se afastam — agressiva alta, normal perto do chão. No limiar anterior "
+        f"({_br(THRESH_MAG_ANTERIOR_MS2, 0)} m/s²) as três já colapsaram em zero e o detector "
+        "deixava de discriminar. Na faixa da literatura "
         f"({_br(faixa_lo)}–{_br(faixa_hi)} m/s²), "
         f"{int((dentro['estilo'] == 'agressiva').sum())} dos "
         f"{int((df['estilo'] == 'agressiva').sum())} trajetos agressivos disparam contra "
         f"{int((dentro['estilo'] == 'normal').sum())} dos "
-        f"{int((df['estilo'] == 'normal').sum())} normais. É esta figura que justifica um valor "
-        "novo em `THRESH_MAG_MS2` — com a curva na tese, a escolha deixa de ser arbitrária."
+        f"{int((df['estilo'] == 'normal').sum())} normais. É esta figura que justifica o limiar "
+        "atual do firmware — com a curva na tese, a escolha deixa de ser arbitrária."
     )
 
     # ---------------------------------------------------------------- 06
-    st.subheader("06 · O que muda se o limiar for recalibrado")
+    st.subheader("06 · O firmware atual contra o melhor par da varredura")
     grade = carregar_grade()
     if grade is None:
         st.info(
@@ -372,25 +385,27 @@ def render(df: pd.DataFrame, limiar: float) -> None:
         st.altair_chart(fig5_antes_depois(vigente, recomendado), width="content")
         st.caption(
             f"**Figura 5.** À esquerda de cada linha, o que o firmware entrega hoje "
-            f"(T = {_br(limiar, 0)} m/s², qualquer evento sinaliza); à direita, o par "
-            f"recomendado (T = {_br(recomendado['limiar_ms2'])} m/s², "
-            f"N = {_br(recomendado['taxa_min_eventos_min'])} eventos/min). A troca é "
-            f"explícita: a detecção de condução agressiva sai de "
-            f"{_br(100 * vigente['sensibilidade'], 0)}% para "
-            f"{_br(100 * recomendado['sensibilidade'], 0)}%, e o preço disso é deixar de "
-            f"preservar {int(recomendado['normal_sinalizados'] - vigente['normal_sinalizados'])} "
-            f"trajeto(s) normal(is) que hoje nunca disparariam."
+            f"(T = {_br(limiar)} m/s², qualquer evento sinaliza); à direita, o melhor par "
+            f"da varredura (T = {_br(recomendado['limiar_ms2'])} m/s², "
+            f"N = {_br(recomendado['taxa_min_eventos_min'])} eventos/min). A detecção de "
+            f"condução agressiva iria de {_br(100 * vigente['sensibilidade'], 0)}% para "
+            f"{_br(100 * recomendado['sensibilidade'], 0)}%, com "
+            f"{int(vigente['normal_sinalizados'])} → {int(recomendado['normal_sinalizados'])} "
+            "trajeto(s) normal(is) sinalizado(s). Ressalva: o par da direita foi escolhido "
+            "e medido nos mesmos 40 trajetos; a validação deixando um motorista de fora "
+            "(nota \"Regra do firmware\", acima) mostra quanto disso se mantém."
         )
 
         c1, c2, c3 = st.columns(3)
         _cartao(
             c1, "Quanto o detector discrimina hoje?",
             f"Youden {_br(vigente['youden'], 3)}", "#eb6834",
-            "Zero é o valor de um detector que não separa os dois grupos. É onde o "
-            "limiar da Seção 2.8 está: nunca dispara, então nunca erra e nunca acerta.",
+            f"Com o limiar do firmware ({_br(limiar)} m/s²). Zero é o valor de um "
+            "detector que não separa os dois grupos — era onde o limiar anterior "
+            f"({_br(THRESH_MAG_ANTERIOR_MS2, 0)} m/s²) ficava: nunca disparava.",
         )
         _cartao(
-            c2, "E com o par recomendado?",
+            c2, "E com o melhor par da varredura?",
             f"Youden {_br(recomendado['youden'], 3)}", "#0ca30c",
             f"Especificidade de {_br(100 * recomendado['especificidade'], 0)}%, acima do "
             f"piso de {_br(100 * ESPECIFICIDADE_MINIMA, 0)}% que a varredura impôs — "
@@ -417,8 +432,9 @@ def render(df: pd.DataFrame, limiar: float) -> None:
             f"entre {_br(grade['limiar_ms2'].min())} e "
             f"{_br(grade[grade['youden'] >= 0.6]['limiar_ms2'].max())} m/s² que funciona "
             f"quase igual, então a escolha não depende de acertar a segunda casa decimal. "
-            f"**O limiar de hoje ({_br(limiar, 0)} m/s²) não aparece na figura porque está "
-            f"fora da faixa varrida**, à direita de todas essas colunas."
+            f"O limiar do firmware ({_br(limiar)} m/s²) é uma das colunas da figura; o "
+            f"anterior ({_br(THRESH_MAG_ANTERIOR_MS2, 0)} m/s²) fica fora da faixa varrida, "
+            "à direita de todas elas."
         )
         st.caption(
             "A varredura usa apenas trajetos normais e agressivos. O rótulo sonolenta "
@@ -450,7 +466,7 @@ def render(df: pd.DataFrame, limiar: float) -> None:
         "- **Não é detecção de sonolência validada.** O rótulo sonolenta é um estilo de condução "
         "instruído no momento da coleta, não uma medida fisiológica.\n"
         "- **Não é precisão por evento.** O UAH-DriveSet rotula o trajeto inteiro, não cada "
-        "manobra; não existe matriz de confusão possível.\n"
+        "manobra; a matriz de confusão da aba é por trajeto — por evento ela não existe.\n"
         "- **Não separa frenagem de curva.** A detecção usa a magnitude sem decomposição por "
         "eixo; a distinção frenagem × aceleração só acontece depois, pelo sinal do eixo X "
         "calibrado, e depende da montagem física do sensor.\n"

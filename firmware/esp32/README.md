@@ -38,17 +38,19 @@ Antes de gravar em um dispositivo real, edite em `config.h`:
   transportadora (nao commitar credenciais reais).
 - `MQTT_BROKER_HOST` / `MQTT_BROKER_PORTA` / `MQTT_TOPICO_EVENTOS`: broker
   de destino.
-- `LIMIAR_MAGNITUDE_MS2`: mantido em 6.0 m/s^2 para ficar comparavel ao
-  limiar padrao usado em `src/validacao_hardware.py` contra o UAH-DriveSet.
+- `LIMIAR_MAGNITUDE_MS2`: 2,9 m/s^2 (p99,9 da magnitude em conducao normal
+  do UAH-DriveSet; ate 23/09/2026 era 6,0). `src/validacao_hardware.py` le
+  este valor do `config.h`, entao firmware e validacao usam sempre o mesmo
+  limiar -- para muda-lo, edite so aqui e rode a validacao de novo.
 
 ## Regra de deteccao de evento
 
 Um evento e registrado quando, fora do periodo refratario de 2 s:
 
 ```
-magnitude > 6,0 m/s^2
+magnitude > 2,9 m/s^2                       (LIMIAR_MAGNITUDE_MS2)
   OU
-(|jerk| > 20 m/s^3  E  magnitude > 3,0 m/s^2)
+(|jerk| > 20 m/s^3  E  magnitude > 1,45 m/s^2)  (LIMIAR_JERK_MS3, PISO_MAGNITUDE_JERK_MS2)
 ```
 
 O jerk e criterio **auxiliar**, nao alternativo. Ele existe para capturar a
@@ -58,17 +60,19 @@ transiente rapido sem aceleracao por tras -- um buraco na pista, o modulo
 batendo no suporte, um chacoalhao manual na bancada -- entraria na fila como
 evento de conducao agressiva.
 
-O valor do piso vem de medicao: em 9 trancos manuais na protoboard montada
-(21/09/2026), o jerk alcancou de 20,9 a 81,3 m/s^3, enquanto a magnitude
-filtrada nunca passou de 1,90 m/s^2. Com o piso em 3,0 m/s^2, metade do limiar
-principal, nenhum desses trancos e registrado.
+O piso segue a regra "metade do limiar principal" e esta PROVISORIO. O valor
+anterior (3,0 m/s^2) vinha de 9 trancos manuais na protoboard (21/09/2026:
+jerk de 20,9 a 81,3 m/s^3, magnitude filtrada nunca acima de 1,90 m/s^2), mas
+essa medicao foi feita com a magnitude antiga (diferenca de normas) e nao
+transfere para a subtracao vetorial atual. Repetir os trancos na bancada e
+ler a magnitude maxima no serial antes da coleta que for para o texto.
 
 **Consequencia para o teste de bancada:** o caminho da magnitude nao e
 alcancavel com a mao -- a media movel absorve quase todo o impulso de ~100 ms
 de um tranco manual, enquanto uma frenagem de veiculo sustenta a aceleracao por
 perto de um segundo e sobrevive ao filtro. A validacao em bancada exercita a
 cadeia completa (sensor, filtro, fila, sincronizacao, painel), mas o limiar de
-6,0 m/s^2 so pode ser exercitado em veiculo.
+2,9 m/s^2 so pode ser exercitado com seguranca em veiculo.
 
 ## Calibracao
 
