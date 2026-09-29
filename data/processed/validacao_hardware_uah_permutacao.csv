@@ -1,0 +1,5 @@
+coluna,estatistica_F,p_permutacao,n_permutacoes,n_trajetos,n_motoristas,observacao
+eventos_por_min,1.1772727272727272,0.5712428757124287,10000,40,6,p obtido por permutacao dentro de cada motorista; a ANOVA parametrica nao se aplica porque trajetos do mesmo condutor nao sao independentes.
+magnitude_maxima_ms2,9.411399348356142,0.0004999500049995,10000,40,6,p obtido por permutacao dentro de cada motorista; a ANOVA parametrica nao se aplica porque trajetos do mesmo condutor nao sao independentes.
+velocidade_media_kmh,10.312212703465159,9.999000099990002e-05,10000,40,6,p obtido por permutacao dentro de cada motorista; a ANOVA parametrica nao se aplica porque trajetos do mesmo condutor nao sao independentes.
+var_curso_media_abs,0.601588086241985,0.5748425157484252,10000,40,6,p obtido por permutacao dentro de cada motorista; a ANOVA parametrica nao se aplica porque trajetos do mesmo condutor nao sao independentes.

@@ -11,7 +11,8 @@ Todas as figuras consomem o MESMO DataFrame por trajeto, com as colunas:
     eventos       int   passagens acima do limiar vigente
     eventos_min   float eventos / duracao_min
 
-É a saída de validacao_hardware.validate_against_uah_driveset().
+É a saída de `python src/validacao_hardware.py`, montada por
+processar_dataset() e normalizada por montar_trajetos().
 
 Regras de codificação seguidas aqui (para não repetir os erros da versão antiga):
   * três cores fixas, sempre na mesma ordem, nunca recicladas;

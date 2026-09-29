@@ -1,10 +1,31 @@
-pandas
-numpy
-scikit-learn
-scipy
-matplotlib
-seaborn
-streamlit
-altair
-plotly
-Faker
+# Dependencias do pipeline de segmentacao e do dashboard.
+#
+# As versoes abaixo sao MINIMOS exigidos pelo codigo, nao as versoes exatas de
+# uma maquina especifica. Cada limite inferior existe por um motivo concreto:
+#
+#   pandas      >= 2.1   DataFrame.stack(future_stack=True), usado em
+#                        src/perfilamento.py
+#   streamlit   >= 1.40  st.pills e os parametros width="content"/"stretch",
+#                        usados em dashboard/app.py
+#   scikit-learn>= 1.3   davies_bouldin_score e calinski_harabasz_score com a
+#                        assinatura usada em src/clustering.py
+#
+# Os limites superiores evitam que uma futura versao maior quebre o projeto
+# em silencio no meio da entrega.
+#
+# Para congelar as versoes exatas da sua maquina antes de entregar (recomendado,
+# porque garante que a banca reproduza o mesmo resultado):
+#     pip freeze > requirements-travado.txt
+#
+# Python: 3.11 ou superior.
+
+pandas>=2.1,<4
+numpy>=1.24,<3
+scikit-learn>=1.3,<2
+scipy>=1.10,<2
+matplotlib>=3.7,<4
+seaborn>=0.12,<1
+streamlit>=1.40,<2
+altair>=5.0,<6
+plotly>=5.18,<7
+Faker>=19.0,<41

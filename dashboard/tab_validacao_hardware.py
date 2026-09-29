@@ -76,7 +76,7 @@ def carregar_grade(caminho: str = CAMINHO_GRADE) -> pd.DataFrame | None:
 
 
 def carregar_histograma(caminho: str = CAMINHO_HISTOGRAMA) -> pd.DataFrame | None:
-    """Classes do histograma de amostras (311 mil leituras do acelerometro a
+    """Classes do histograma de amostras (leituras do acelerometro a
     10Hz), uma linha por comportamento x tipo_via x classe -- agregada aqui
     somando os dois tipos de via, porque esta figura compara comportamento,
     nao via. Vem de src/validacao_hardware.py; None se ainda nao foi gerada."""
@@ -109,7 +109,7 @@ def carregar_limiar_recalibrado(limiar_vigente: float,
 
 def contagem_por_faixa(limiar_vigente: float, limiar_recalibrado: float,
                        caminho: str = CAMINHO_LIMIARES) -> dict | None:
-    """Quantas das 311 mil amostras caem abaixo do recalibrado, entre os dois
+    """Quantas amostras caem abaixo do recalibrado, entre os dois
     limiares, e acima do vigente -- somado dos n_acima/n_total que
     src/validacao_hardware.py ja calculou por comportamento x via (nunca
     reimplementado aqui a partir do sinal bruto)."""
@@ -164,7 +164,8 @@ def carregar(caminho: str = "data/processed/uah_trips.csv") -> pd.DataFrame:
     if faltando:
         raise ValueError(
             f"{alvo} não tem as colunas {faltando}. "
-            "Rode validacao_hardware.validate_against_uah_driveset() primeiro."
+            "Rode `python src/validacao_hardware.py` primeiro "
+            "(gera o CSV via processar_dataset + montar_trajetos)."
         )
     df["estilo"] = df["estilo"].str.lower().replace(
         {"aggressive": "agressiva", "drowsy": "sonolenta", "normal": "normal"})
@@ -233,16 +234,24 @@ def render(df: pd.DataFrame, limiar: float) -> None:
         ("rótulo comportamental", "normal, agressiva ou sonolenta. Foi a *instrução dada ao "
                                   "motorista* antes de sair e vale para o trajeto inteiro — "
                                   "não é medição, não é diagnóstico, não muda ao longo do percurso."),
-        ("magnitude da aceleração", "‖(x,y,z)‖ do acelerômetro depois do filtro passa-baixa e da "
-                                    "subtração da gravidade. Sem eixo: uma curva brusca entra na "
-                                    "conta igual a uma frenagem."),
+        ("magnitude da aceleração", "‖(y,z)‖ dos canais já filtrados por Kalman que o próprio "
+                                    "dataset entrega — longitudinal e lateral, os dois eixos de "
+                                    "manobra. Sem subtração de gravidade: os canais do UAH-DriveSet "
+                                    "já vêm sem ela. Sem eixo: uma curva brusca entra na conta igual "
+                                    "a uma frenagem. O firmware embarcado calcula os três eixos e "
+                                    "subtrai a gravidade por calibração — esta validação cobre uma "
+                                    "versão simplificada, como declarado no módulo."),
         ("pico do trajeto", "O maior valor dessa magnitude no trajeto inteiro. Um número por "
                             "trajeto. É a régua das Figuras 1, 2 e 4."),
-        ("limiar", f"O valor a partir do qual o firmware chama a leitura de evento. Hoje: "
-                   f"{_br(limiar, 0)} m/s². Não é constante da física — é escolha de projeto, "
-                   "e é ela que está em teste aqui."),
-        ("evento", "Uma passagem acima do limiar. É a única coisa que o dispositivo grava e "
-                   "transmite; o sinal bruto nunca sai da borda."),
+        ("limiar", f"O valor de magnitude a partir do qual o firmware chama a leitura de "
+                   f"evento. Hoje: {_br(limiar, 0)} m/s². Não é constante da física — é "
+                   "escolha de projeto, e é ela que está em teste aqui."),
+        ("evento", f"No firmware: magnitude acima de {_br(limiar, 0)} m/s², **ou** variação "
+                   "brusca dessa magnitude (jerk) acompanhada de pelo menos 3,0 m/s² de "
+                   "aceleração real — o jerk é critério auxiliar e não dispara sozinho, "
+                   "justamente para que um solavanco isolado não vire evento de condução. "
+                   "Nesta validação conta-se apenas o critério de magnitude. É a única "
+                   "coisa que o dispositivo grava e transmite; o sinal bruto nunca sai da borda."),
         ("eventos/min", "Eventos detectados dividido pela duração do trajeto. É a métrica de "
                         "produto — a que iria para a precificação."),
         ("g", "1 g = 9,81 m/s². A literatura de telemática fala em g; o firmware fala em m/s². "

@@ -2,7 +2,8 @@
 Etapa 2 (Secao 3.5.2): aplicacao e calibracao do K-Means sobre a matriz
 normalizada das 19 variaveis (Quadro 2), com inicializacao K-Means++,
 n_init=10, validacao do numero de clusters pelo Metodo do Cotovelo (k=2..8)
-e pelo indice de Silhouette, e ajuste do modelo final para k=3 (hipotese dos
+e por tres indices internos (Silhouette, Davies-Bouldin e
+Calinski-Harabasz), e ajuste do modelo final para k=3 (hipotese dos
 tres perfis-alvo definidos na Secao 3.4).
 
 Uso:
@@ -15,9 +16,13 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from sklearn.cluster import KMeans
-from sklearn.metrics import silhouette_score
+from sklearn.metrics import (
+    calinski_harabasz_score,
+    davies_bouldin_score,
+    silhouette_score,
+)
 
-from preprocessamento import COLUNAS_19
+from preprocessamento import COLUNAS_MODELO
 
 RANDOM_STATE = 42
 
@@ -38,12 +43,30 @@ def curva_cotovelo(X: np.ndarray, k_min: int = 2, k_max: int = 8) -> dict:
 
 def curva_silhouette(X: np.ndarray, k_min: int = 2, k_max: int = 8) -> dict:
     """Indice de Silhouette medio do K-Means para cada k no intervalo."""
-    scores = {}
+    return {k: v["silhouette"] for k, v in curva_indices(X, k_min, k_max).items()}
+
+
+def curva_indices(X: np.ndarray, k_min: int = 2, k_max: int = 8) -> dict:
+    """Tres indices internos de validacao para cada k, medindo aspectos
+    diferentes da qualidade da particao:
+
+      Silhouette        -- coesao vs separacao; maior e melhor (faixa -1 a 1).
+      Davies-Bouldin    -- razao dispersao/separacao; MENOR e melhor.
+      Calinski-Harabasz -- variancia entre/dentro; maior e melhor.
+
+    Usar os tres evita escolher k por um unico criterio, que e a critica usual
+    a validacao de agrupamento por indice isolado.
+    """
+    indices = {}
     for k in range(k_min, k_max + 1):
         modelo = KMeans(n_clusters=k, init="k-means++", n_init=10, random_state=RANDOM_STATE)
         rotulos = modelo.fit_predict(X)
-        scores[k] = silhouette_score(X, rotulos)
-    return scores
+        indices[k] = {
+            "silhouette": silhouette_score(X, rotulos),
+            "davies_bouldin": davies_bouldin_score(X, rotulos),
+            "calinski_harabasz": calinski_harabasz_score(X, rotulos),
+        }
+    return indices
 
 
 def k_otimo_cotovelo(inercias: dict) -> int:
@@ -98,10 +121,11 @@ def main():
     saida_dir.mkdir(parents=True, exist_ok=True)
 
     df_norm = carregar_matriz(entrada)
-    X = df_norm[COLUNAS_19].to_numpy()
+    X = df_norm[COLUNAS_MODELO].to_numpy()
 
     inercias = curva_cotovelo(X, args.k_min, args.k_max)
-    silhouettes = curva_silhouette(X, args.k_min, args.k_max)
+    indices = curva_indices(X, args.k_min, args.k_max)
+    silhouettes = {k: v["silhouette"] for k, v in indices.items()}
 
     k_cotovelo = k_otimo_cotovelo(inercias)
     k_silhouette = k_otimo_silhouette(silhouettes)
@@ -111,19 +135,35 @@ def main():
         marcador = " <- cotovelo" if k == k_cotovelo else ""
         print(f"  k={k}: {v:.4f}{marcador}")
 
-    print("\nIndice de Silhouette por k:")
-    for k, v in silhouettes.items():
-        marcador = " <- maximo" if k == k_silhouette else ""
-        print(f"  k={k}: {v:.4f}{marcador}")
+    k_db = min(indices, key=lambda k: indices[k]["davies_bouldin"])
+    k_ch = max(indices, key=lambda k: indices[k]["calinski_harabasz"])
+
+    print("\nIndices internos de validacao por k:")
+    print(f"  {'k':>3}  {'Silhouette':>11}  {'Davies-Bouldin':>15}  {'Calinski-Harabasz':>18}")
+    for k, v in indices.items():
+        marcas = []
+        if k == k_silhouette:
+            marcas.append("Sil")
+        if k == k_db:
+            marcas.append("DB")
+        if k == k_ch:
+            marcas.append("CH")
+        sufixo = f"   <- melhor por {', '.join(marcas)}" if marcas else ""
+        print(f"  {k:>3}  {v['silhouette']:>11.4f}  {v['davies_bouldin']:>15.4f}  "
+              f"{v['calinski_harabasz']:>18.2f}{sufixo}")
 
     print(f"\nk sugerido pelo cotovelo: {k_cotovelo}")
     print(f"k sugerido pelo Silhouette: {k_silhouette}")
+    print(f"k sugerido pelo Davies-Bouldin: {k_db}")
+    print(f"k sugerido pelo Calinski-Harabasz: {k_ch}")
     print(f"k adotado para o modelo final: {args.k} (hipotese dos 3 perfis-alvo, Secao 3.4)")
 
     validacao_df = pd.DataFrame({
         "k": list(inercias.keys()),
         "inercia": list(inercias.values()),
-        "silhouette": [silhouettes[k] for k in inercias],
+        "silhouette": [indices[k]["silhouette"] for k in inercias],
+        "davies_bouldin": [indices[k]["davies_bouldin"] for k in inercias],
+        "calinski_harabasz": [indices[k]["calinski_harabasz"] for k in inercias],
     })
     caminho_validacao = saida_dir / "validacao_k.csv"
     validacao_df.to_csv(caminho_validacao, index=False)
@@ -131,7 +171,12 @@ def main():
     modelo_final = treinar_kmeans(X, args.k)
     rotulos = modelo_final.labels_
     silhouette_final = silhouette_score(X, rotulos)
-    print(f"\nSilhouette do modelo final (k={args.k}): {silhouette_final:.4f}")
+    db_final = davies_bouldin_score(X, rotulos)
+    ch_final = calinski_harabasz_score(X, rotulos)
+    print(f"\nModelo final (k={args.k}):")
+    print(f"  Silhouette:        {silhouette_final:.4f}  (maior e melhor)")
+    print(f"  Davies-Bouldin:    {db_final:.4f}  (menor e melhor)")
+    print(f"  Calinski-Harabasz: {ch_final:.2f}  (maior e melhor)")
 
     df_norm_saida = df_norm.copy()
     df_norm_saida["cluster"] = rotulos

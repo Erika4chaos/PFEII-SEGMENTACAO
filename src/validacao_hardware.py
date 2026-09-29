@@ -43,13 +43,33 @@ aceleracoes longitudinal e lateral, respectivamente -- os dois eixos que
 importam para frenagem/aceleracao/curva. X (vertical) e excluido da
 magnitude de manobra por nao corresponder a nenhuma dessas manobras.
 
-ATENCAO -- diferenca em relacao ao firmware descrito na Secao 2.8: o
-firmware completo faz subtracao de gravidade por calibracao estacionaria,
-media movel passa-baixa e usa magnitude + jerk. O que e validado aqui e uma
-versao simplificada: magnitude de 2 eixos sobre o sinal que o dataset ja
-entrega condicionado, SEM criterio de jerk (o jerk e calculado e persistido
-para inspecao, mas nao entra na deteccao). Essa diferenca precisa estar
-declarada no texto do TCC -- nao e o firmware inteiro que esta validado.
+ATENCAO -- diferencas em relacao ao firmware, que precisam estar declaradas
+no texto do TCC. Nao e o firmware inteiro que esta validado aqui:
+
+(a) EIXOS E CONDICIONAMENTO. O firmware le tres eixos, subtrai a gravidade por
+    calibracao estacionaria e aplica media movel passa-baixa. Aqui a magnitude
+    usa dois eixos (Y e Z, longitudinal e lateral) sobre o sinal que o dataset
+    ja entrega filtrado por Kalman e sem gravidade.
+
+(b) CRITERIO DE JERK. O firmware registra evento por
+        magnitude > 6,0  OU  (|jerk| > 20 E magnitude > 3,0)
+    -- o jerk e auxiliar e exige um piso de aceleracao real junto (ver
+    PISO_MAGNITUDE_JERK_MS2 em firmware/esp32/include/config.h). Aqui a
+    deteccao usa SOMENTE a magnitude; o jerk e calculado e persistido para
+    inspecao, mas nao entra na regra.
+
+    O piso tornou as duas regras mais proximas do que eram: como o jerk
+    sozinho nao dispara mais, o caminho dominante do firmware passou a ser o
+    mesmo que esta validado aqui. A diferenca remanescente e que o firmware
+    pode registrar um evento com magnitude entre 3,0 e 6,0 quando o jerk for
+    alto -- casos que esta validacao, por ser so de magnitude, nao conta.
+
+(c) TAXA DE AMOSTRAGEM. O dataset e amostrado a ~10 Hz e o firmware a 50 Hz. A
+    contagem de eventos aqui agrupa travessias do limiar dentro do mesmo
+    periodo refratario de 2 s usado pelo firmware (ver
+    contar_eventos_agrupados), o que torna as duas contagens comparaveis em
+    ordem de grandeza -- mas nao identicas, porque a resolucao temporal do
+    sinal e diferente.
 
 RAW_GPS.txt (espaco como delimitador, sem cabecalho; opcional -- usado apenas
 para enriquecer o resumo por trajeto, a deteccao de eventos independe dele):
@@ -131,10 +151,30 @@ MOTORISTA_RE = re.compile(r"^D\d+$", re.IGNORECASE)
 
 
 def detectar_comportamento(caminho_trajeto: Path) -> str:
-    caminho_str = str(caminho_trajeto).lower()
-    for chave, rotulo in PALAVRAS_CHAVE_COMPORTAMENTO.items():
-        if chave in caminho_str:
-            return rotulo
+    """Rotulo comportamental a partir do NOME DA PASTA DO TRAJETO.
+
+    Busca no nome da pasta, e nao no caminho completo: se a base estiver sob
+    um diretorio que por acaso contenha "normal" (um "C:/Users/.../normal/"
+    qualquer), a busca no caminho inteiro rotularia TODOS os trajetos abaixo
+    dele com esse rotulo, silenciosamente. O UAH-DriveSet codifica o rotulo no
+    proprio nome do trajeto (ex.: "20151111125233-24km-D1-AGGRESSIVE-MOTORWAY").
+
+    Se nada for encontrado no nome da pasta, procura-se nos diretorios
+    imediatamente acima ate a pasta do motorista (D1, D2...), que e o limite
+    seguro: acima dela esta o caminho de instalacao, fora do controle do
+    dataset.
+    """
+    candidatos = [caminho_trajeto.name]
+    for parte in reversed(caminho_trajeto.parent.parts):
+        if MOTORISTA_RE.match(parte):
+            break
+        candidatos.append(parte)
+
+    for nome in candidatos:
+        nome_baixo = nome.lower()
+        for chave, rotulo in PALAVRAS_CHAVE_COMPORTAMENTO.items():
+            if chave in nome_baixo:
+                return rotulo
     return "desconhecido"
 
 
@@ -188,12 +228,59 @@ def calcular_magnitude_ms2(df_acc: pd.DataFrame) -> pd.Series:
     return magnitude_g * G_MS2
 
 
+# Periodo refratario do firmware (INTERVALO_MIN_ENTRE_EVENTOS_MS em
+# firmware/esp32/include/config.h). Uma manobra brusca mantem a magnitude
+# acima do limiar por varias amostras consecutivas; sem agrupa-las, uma unica
+# frenagem vira dezenas de "eventos" e a contagem passa a depender da TAXA DE
+# AMOSTRAGEM em vez do comportamento. Isso importa especialmente aqui: o
+# UAH-DriveSet e amostrado a ~10 Hz e o firmware a 50 Hz, entao a contagem por
+# amostra isolada nao seria comparavel entre os dois.
+REFRATARIO_S = 2.0
+
+
+def contar_eventos_agrupados(magnitude: np.ndarray, timestamp: np.ndarray,
+                             limiar_ms2: float,
+                             refratario_s: float = REFRATARIO_S) -> int:
+    """Numero de eventos DISTINTOS, espelhando a regra do firmware: uma
+    travessia do limiar so conta como evento novo se tiver passado mais de
+    `refratario_s` desde o ultimo evento registrado."""
+    acima = magnitude > limiar_ms2
+    if not np.any(acima):
+        return 0
+
+    instantes = timestamp[acima]
+    total = 1
+    ultimo = instantes[0]
+    for t in instantes[1:]:
+        if t - ultimo > refratario_s:
+            total += 1
+            ultimo = t
+    return total
+
+
 def detectar_eventos(df_acc: pd.DataFrame, limiar_ms2: float = THRESH_MAG_MS2) -> pd.DataFrame:
+    """Marca as amostras acima do limiar e o inicio de cada evento agrupado.
+
+    `evento_amostra` e a marcacao bruta (amostra a amostra); `evento` marca
+    apenas a PRIMEIRA amostra de cada evento distinto, que e o que deve ser
+    contado."""
     df = df_acc.copy()
     df["magnitude_ms2"] = calcular_magnitude_ms2(df)
     dt = df["timestamp"].diff().replace(0, np.nan)
     df["jerk_ms3"] = df["magnitude_ms2"].diff() / dt
-    df["evento"] = df["magnitude_ms2"] > limiar_ms2
+    df["evento_amostra"] = df["magnitude_ms2"] > limiar_ms2
+
+    inicio = np.zeros(len(df), dtype=bool)
+    indices_acima = np.flatnonzero(df["evento_amostra"].to_numpy())
+    if indices_acima.size:
+        instantes = df["timestamp"].to_numpy()
+        ultimo = instantes[indices_acima[0]]
+        inicio[indices_acima[0]] = True
+        for idx in indices_acima[1:]:
+            if instantes[idx] - ultimo > REFRATARIO_S:
+                inicio[idx] = True
+                ultimo = instantes[idx]
+    df["evento"] = inicio
     return df
 
 
@@ -388,26 +475,30 @@ ESPECIFICIDADE_MINIMA = 0.85
 def _perfil_deteccao(pasta_trajeto: Path) -> dict:
     """Le o sinal bruto de UM trajeto e guarda o que a varredura precisa.
 
-    Guarda a magnitude ordenada em vez de recalcula-la a cada limiar: como
-    detectar_eventos() marca evento por amostra isolada (magnitude > T), a
-    contagem de eventos em T e o numero de amostras a direita de T no vetor
-    ordenado. Uma busca binaria por limiar da exatamente o mesmo numero que
-    reprocessar o trajeto, sem reler o arquivo 26 vezes."""
+    Guarda a serie temporal (magnitude + timestamp) em vez de reler o arquivo a
+    cada limiar. A serie ORDENADA NO TEMPO e necessaria porque a contagem de
+    eventos agrupa travessias dentro do periodo refratario -- o atalho antigo
+    (contar amostras a direita de T no vetor ordenado por valor) so valeria se
+    cada amostra acima do limiar fosse um evento, que e justamente o que se
+    corrigiu aqui."""
     df_acc = carregar_acelerometro(pasta_trajeto / "RAW_ACCELEROMETERS.txt")
+    magnitude = calcular_magnitude_ms2(df_acc).to_numpy()
     return {
         "trajeto": pasta_trajeto.name,
         "motorista": extrair_motorista(pasta_trajeto),
         "comportamento": detectar_comportamento(pasta_trajeto),
         "duracao_min": (df_acc["timestamp"].max() - df_acc["timestamp"].min()) / 60.0,
-        "magnitude_ordenada": np.sort(calcular_magnitude_ms2(df_acc).to_numpy()),
+        "magnitude": magnitude,
+        "timestamp": df_acc["timestamp"].to_numpy(),
+        "magnitude_ordenada": np.sort(magnitude),
     }
 
 
 def _taxa_eventos(perfil: dict, limiar_ms2: float) -> float:
-    """Eventos por minuto do trajeto sob um limiar. Espelha a regra de
-    detectar_eventos(): comparacao ESTRITA, magnitude > limiar."""
-    magnitude = perfil["magnitude_ordenada"]
-    n_eventos = magnitude.size - int(np.searchsorted(magnitude, limiar_ms2, side="right"))
+    """Eventos por minuto do trajeto sob um limiar, com agrupamento pelo
+    periodo refratario -- mesma regra de detectar_eventos() e do firmware."""
+    n_eventos = contar_eventos_agrupados(
+        perfil["magnitude"], perfil["timestamp"], limiar_ms2)
     duracao = perfil["duracao_min"]
     return n_eventos / duracao if duracao > 0 else 0.0
 
@@ -424,7 +515,14 @@ def varrer_calibracao(raiz: Path, limiares=GRADE_LIMIAR_MS2,
     Com n=40 (17 normais, 11 agressivos), cada trajeto move a sensibilidade em
     ~9 pontos e a especificidade em ~6. A grade serve para mostrar ONDE existe
     uma regiao de operacao, nao para eleger um par com precisao decimal."""
-    perfis = [_perfil_deteccao(p) for p in listar_trajetos(raiz)]
+    return _grade_de_perfis([_perfil_deteccao(p) for p in listar_trajetos(raiz)],
+                           limiares, taxas)
+
+
+def _grade_de_perfis(perfis: list, limiares, taxas) -> pd.DataFrame:
+    """Nucleo de varrer_calibracao, separado para que a validacao
+    leave-one-driver-out possa montar a grade sobre um subconjunto de
+    trajetos sem reler os arquivos."""
     comportamento = np.array([p["comportamento"] for p in perfis])
     # Uma coluna por limiar: a taxa de eventos nao depende de N, entao vale a
     # pena calcula-la uma vez e reutiliza-la em toda a faixa de N.
@@ -515,6 +613,140 @@ _RENOMEIO_TRAJETO = {
 _VIA_NORMALIZADA = {"Rodovia": "rodovia", "Via secundaria": "secundaria"}
 
 
+def varrer_calibracao_lodo(raiz: Path, limiares=GRADE_LIMIAR_MS2,
+                           taxas=GRADE_TAXA_MIN) -> pd.DataFrame:
+    """Validacao leave-one-driver-out do ponto de operacao (T, N).
+
+    POR QUE ISSO EXISTE. `varrer_calibracao` testa centenas de pares nos mesmos
+    40 trajetos e `_melhor_par` reporta o desempenho do vencedor. Esse numero e
+    o MAXIMO de centenas de estimativas ruidosas na mesma amostra: ele mede o
+    quanto a grade se ajustou a este conjunto, nao o quanto a regra
+    generalizaria para um motorista novo -- que e a pergunta que a banca fara.
+
+    Aqui o par e escolhido usando apenas os trajetos dos OUTROS motoristas e
+    avaliado no motorista retido, uma vez para cada um dos 6. O que deve ser
+    reportado no texto e a FAIXA entre os folds, nao um numero unico: com 6
+    folds e poucos trajetos por motorista, a dispersao e parte do resultado.
+    """
+    perfis = [_perfil_deteccao(p) for p in listar_trajetos(raiz)]
+    motoristas = sorted({p["motorista"] for p in perfis})
+
+    linhas = []
+    for motorista in motoristas:
+        treino = [p for p in perfis if p["motorista"] != motorista]
+        teste = [p for p in perfis if p["motorista"] == motorista]
+
+        rotulos_teste = {p["comportamento"] for p in teste}
+        if not {"normal", "agressiva"} & rotulos_teste:
+            continue  # motorista sem nenhum dos dois rotulos nao avalia nada
+
+        grade_treino = _grade_de_perfis(treino, limiares, taxas)
+        escolhido = _melhor_par(grade_treino)
+
+        avaliacao = _grade_de_perfis(
+            teste, [escolhido["limiar_ms2"]], [escolhido["taxa_min_eventos_min"]]
+        ).iloc[0]
+
+        linhas.append({
+            "motorista_retido": motorista,
+            "limiar_escolhido_ms2": float(escolhido["limiar_ms2"]),
+            "taxa_escolhida_eventos_min": float(escolhido["taxa_min_eventos_min"]),
+            "youden_no_treino": float(escolhido["youden"]),
+            "n_agressiva_teste": int(avaliacao["n_agressiva"]),
+            "sensibilidade_teste": float(avaliacao["sensibilidade"]),
+            "n_normal_teste": int(avaliacao["n_normal"]),
+            "especificidade_teste": float(avaliacao["especificidade"]),
+            "youden_teste": float(avaliacao["youden"]),
+        })
+
+    return pd.DataFrame(linhas)
+
+
+def resumir_lodo(df_lodo: pd.DataFrame) -> dict:
+    """Faixa e mediana das metricas entre folds -- o que deve ir para o texto."""
+    if df_lodo.empty:
+        return {}
+
+    def faixa(coluna):
+        s = df_lodo[coluna].dropna()
+        if s.empty:
+            return None
+        return {"mediana": float(s.median()), "min": float(s.min()), "max": float(s.max())}
+
+    return {
+        "n_folds": int(len(df_lodo)),
+        "sensibilidade": faixa("sensibilidade_teste"),
+        "especificidade": faixa("especificidade_teste"),
+        "youden": faixa("youden_teste"),
+        "limiares_escolhidos": sorted(df_lodo["limiar_escolhido_ms2"].unique().tolist()),
+        "taxas_escolhidas": sorted(df_lodo["taxa_escolhida_eventos_min"].unique().tolist()),
+    }
+
+
+def teste_permutacao_estratificado(df_resumo: pd.DataFrame, coluna: str,
+                                   n_permutacoes: int = 10000,
+                                   seed: int = 42) -> dict:
+    """Teste de permutacao com os rotulos embaralhados DENTRO de cada motorista.
+
+    POR QUE NAO ANOVA. A ANOVA de um fator assume observacoes independentes, e
+    os 40 trajetos vem de 6 motoristas -- dois trajetos do mesmo condutor
+    compartilham estilo de direcao, veiculo e trajeto. Alem disso a taxa de
+    eventos e uma distribuicao fortemente assimetrica, com massa concentrada em
+    zero, longe da normalidade que a ANOVA pressupoe.
+
+    Permutar dentro do motorista preserva exatamente essas duas coisas: cada
+    condutor mantem o seu numero de trajetos de cada tipo e o seu nivel proprio
+    de agitacao; o que se embaralha e apenas QUAL trajeto recebeu QUAL rotulo.
+    A estatistica observada (F) e comparada com a distribuicao gerada assim.
+    """
+    conhecidos = df_resumo[df_resumo["comportamento"] != "desconhecido"].copy()
+    conhecidos = conhecidos.dropna(subset=[coluna])
+    if conhecidos["comportamento"].nunique() < 2:
+        return {}
+
+    def estatistica_f(rotulos: np.ndarray) -> float:
+        grupos = [conhecidos.loc[rotulos == r, coluna].to_numpy()
+                  for r in np.unique(rotulos)]
+        grupos = [g for g in grupos if len(g) > 0]
+        if len(grupos) < 2:
+            return np.nan
+        return float(f_oneway(*grupos).statistic)
+
+    rotulos_obs = conhecidos["comportamento"].to_numpy()
+    f_obs = estatistica_f(rotulos_obs)
+
+    motoristas = conhecidos["motorista"].to_numpy()
+    rng = np.random.default_rng(seed)
+    indices_por_motorista = [np.flatnonzero(motoristas == m)
+                             for m in np.unique(motoristas)]
+
+    extremos = 0
+    for _ in range(n_permutacoes):
+        permutados = rotulos_obs.copy()
+        for indices in indices_por_motorista:
+            permutados[indices] = rng.permutation(rotulos_obs[indices])
+        f_perm = estatistica_f(permutados)
+        if np.isfinite(f_perm) and f_perm >= f_obs:
+            extremos += 1
+
+    # Estimador com correcao de continuidade: nunca reporta p exatamente 0.
+    p_valor = (extremos + 1) / (n_permutacoes + 1)
+
+    return {
+        "coluna": coluna,
+        "estatistica_F": f_obs,
+        "p_permutacao": p_valor,
+        "n_permutacoes": n_permutacoes,
+        "n_trajetos": int(len(conhecidos)),
+        "n_motoristas": int(len(indices_por_motorista)),
+        "observacao": (
+            "p obtido por permutacao dentro de cada motorista; a ANOVA "
+            "parametrica nao se aplica porque trajetos do mesmo condutor nao "
+            "sao independentes."
+        ),
+    }
+
+
 def montar_trajetos(df_resumo: pd.DataFrame) -> pd.DataFrame:
     """Renomeia o resumo por trajeto para o contrato do dashboard.
 
@@ -551,8 +783,13 @@ def calcular_confundimento(df_resumo: pd.DataFrame) -> pd.DataFrame:
 
 
 def validar_discriminacao(df_resumo: pd.DataFrame, coluna: str):
-    """ANOVA one-way comparando a coluna informada entre os rotulos
-    comportamentais conhecidos (normal/agressiva/sonolenta)."""
+    """ANOVA one-way entre os rotulos comportamentais conhecidos.
+
+    ATENCAO: mantida apenas como referencia/contexto. A premissa de
+    independencia NAO se sustenta aqui (40 trajetos de 6 motoristas), e a
+    distribuicao da taxa de eventos e assimetrica com massa em zero. Para
+    inferencia, usar `teste_permutacao_estratificado`, que embaralha os
+    rotulos dentro de cada motorista."""
     conhecidos = df_resumo[df_resumo["comportamento"] != "desconhecido"]
     grupos = [g[coluna].dropna().to_numpy() for _, g in conhecidos.groupby("comportamento")]
     grupos = [g for g in grupos if len(g) > 0]
@@ -603,6 +840,7 @@ def main():
     print("\nTaxa de eventos por minuto, agregada por comportamento conhecido:")
     print(df_resumo.groupby("comportamento")["eventos_por_min"].agg(["mean", "median", "std", "count"]))
 
+    resultados_permutacao = []
     colunas_anova = ["eventos_por_min", "magnitude_maxima_ms2"]
     if df_resumo["velocidade_media_kmh"].notna().any():
         colunas_anova += ["velocidade_media_kmh", "var_curso_media_abs"]
@@ -616,8 +854,20 @@ def main():
                 f"\nANOVA one-way ({coluna} ~ comportamento): "
                 f"F={resultado_anova.statistic:.4f}, p={resultado_anova.pvalue:.6f}, n={n_por_grupo}"
             )
+            perm = teste_permutacao_estratificado(df_resumo, coluna)
+            if perm:
+                print(
+                    f"  Permutacao estratificada por motorista ({perm['n_permutacoes']:,} "
+                    f"reamostragens, {perm['n_motoristas']} motoristas): "
+                    f"p={perm['p_permutacao']:.4f}  <- usar ESTE no texto"
+                )
+                resultados_permutacao.append(perm)
         else:
             print(f"\nRotulos comportamentais insuficientes para ANOVA em {coluna} (minimo de 2 grupos conhecidos).")
+
+    if resultados_permutacao:
+        pd.DataFrame(resultados_permutacao).to_csv(
+            saida_dir / "validacao_hardware_uah_permutacao.csv", index=False)
 
     print("\n=== Confundimento motorista x comportamento x tipo de via ===")
     confundimento = calcular_confundimento(df_resumo)
@@ -661,11 +911,36 @@ def main():
     print(f"Trajetos (contrato do dashboard) salvos em: {caminho_trajetos}")
 
     print()
+    print("=== Validacao leave-one-driver-out do ponto de operacao ===")
+    print("O par (T, N) e escolhido nos outros motoristas e medido no retido.")
+    lodo = varrer_calibracao_lodo(dataset_dir)
+    if lodo.empty:
+        print("Motoristas insuficientes para leave-one-driver-out.")
+    else:
+        lodo.to_csv(saida_dir / "validacao_hardware_uah_lodo.csv", index=False)
+        print(lodo.to_string(index=False))
+        resumo_lodo = resumir_lodo(lodo)
+        sens, espec = resumo_lodo["sensibilidade"], resumo_lodo["especificidade"]
+        print(
+            f"\n  Sensibilidade fora da amostra: mediana {100 * sens['mediana']:.1f}% "
+            f"(faixa {100 * sens['min']:.1f}%-{100 * sens['max']:.1f}%)"
+        )
+        print(
+            f"  Especificidade fora da amostra: mediana {100 * espec['mediana']:.1f}% "
+            f"(faixa {100 * espec['min']:.1f}%-{100 * espec['max']:.1f}%)"
+        )
+        print("  ESTA faixa e o que deve ir para o texto -- nao o desempenho do")
+        print("  melhor par da grade, que e medido na mesma amostra que o elegeu.")
+
+    print()
     print("=== Varredura de calibracao (limiar x taxa minima) ===")
     print(f"{len(GRADE_LIMIAR_MS2)} limiares de {GRADE_LIMIAR_MS2[0]:.1f} a "
           f"{GRADE_LIMIAR_MS2[-1]:.1f} m/s^2 x {len(GRADE_TAXA_MIN)} taxas de "
           f"{GRADE_TAXA_MIN[0]:.1f} a {GRADE_TAXA_MIN[-1]:.1f} ev/min. "
           "Metricas so com trajetos normais e agressivos; sonolenta reportada a parte.")
+    print("ATENCAO: os numeros abaixo sao do par escolhido NA MESMA amostra em")
+    print("que foi avaliado -- sao otimistas por construcao. Servem para mostrar")
+    print("onde existe uma regiao de operacao; para desempenho, use o LODO acima.")
     grade = varrer_calibracao(dataset_dir)
     caminho_grade = saida_dir / "grade_calibracao.csv"
     grade.to_csv(caminho_grade, index=False)
