@@ -26,6 +26,7 @@ Uso:
     streamlit run dashboard/app.py
 """
 
+import importlib
 import sys
 from pathlib import Path
 
@@ -38,6 +39,16 @@ import streamlit as st
 RAIZ = Path(__file__).resolve().parent.parent
 sys.path.append(str(RAIZ / "src"))
 sys.path.append(str(RAIZ))
+
+# O Streamlit so recarrega sozinho os modulos que ficam dentro de dashboard/.
+# Os de src/ ficam em cache no processo: depois de um push, o app continuava
+# usando a versao ANTIGA de validacao_hardware e quebrava com ImportError ao
+# procurar um nome novo (foi o que aconteceu com THRESH_MAG_ANTERIOR_MS2).
+# Recarregar aqui garante que cada execucao usa o codigo que esta no disco.
+for _modulo in ("preprocessamento", "validacao_hardware"):
+    if _modulo in sys.modules:
+        importlib.reload(sys.modules[_modulo])
+
 from preprocessamento import COLUNAS_19, COLUNAS_MODELO  # noqa: E402
 from validacao_hardware import THRESH_MAG_MS2, THRESH_MAG_ANTERIOR_MS2  # noqa: E402
 from validacao_hardware import ESPECIFICIDADE_MINIMA, _melhor_par  # noqa: E402
