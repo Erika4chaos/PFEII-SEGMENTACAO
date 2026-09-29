@@ -34,7 +34,6 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
-from sklearn.decomposition import PCA
 
 RAIZ = Path(__file__).resolve().parent.parent
 sys.path.append(str(RAIZ / "src"))
@@ -219,15 +218,29 @@ def calcular_conduta_normalizada(resumo: pd.DataFrame):
 
 
 def projetar_pca(normalizada: pd.DataFrame) -> tuple[pd.DataFrame, list]:
-    pca = PCA(n_components=2, random_state=42)
     # Projeta as MESMAS colunas que alimentaram o K-Means. Usar a lista do
     # Quadro 2 aqui mostraria uma projecao de um espaco diferente daquele em
     # que os clusters foram formados.
-    componentes = pca.fit_transform(normalizada[COLUNAS_MODELO])
+    #
+    # PCA feito so com numpy (SVD da matriz centrada), com a mesma convencao de
+    # sinal do scikit-learn: em cada componente, a carga de maior valor
+    # absoluto fica positiva. Evita importar o scikit-learn -- e, com ele, as
+    # DLLs do scipy -- so para desenhar esta figura; em Windows com Smart App
+    # Control essas DLLs podem ser bloqueadas e o painel nem abria.
+    matriz = normalizada[COLUNAS_MODELO].to_numpy(dtype=float)
+    centrada = matriz - matriz.mean(axis=0)
+    _, valores_singulares, vt = np.linalg.svd(centrada, full_matrices=False)
+    sinais = np.sign(vt[np.arange(vt.shape[0]), np.argmax(np.abs(vt), axis=1)])
+    sinais[sinais == 0] = 1.0
+    vt = vt * sinais[:, None]
+    componentes = centrada @ vt[:2].T
+    variancia = valores_singulares ** 2
+    razao = (variancia / variancia.sum())[:2]
+
     projecao = normalizada[["numeroApolice", "cluster"]].copy()
     projecao["PCA1"] = componentes[:, 0]
     projecao["PCA2"] = componentes[:, 1]
-    return projecao, pca.explained_variance_ratio_[:2].tolist()
+    return projecao, razao.tolist()
 
 
 def numero_perfil(medias: pd.Series) -> int:
@@ -699,7 +712,7 @@ def render_tab_software(projecao, kpis_cluster, gerais, variancia_pc):
         )
         fig = _layout_plotly(fig, 360)
         fig.update_layout(margin=dict(l=0, r=0, t=40, b=0))
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
 
 
 # ---------------------------------------------------------------------------
@@ -993,7 +1006,7 @@ def render_tab_hardware(limiar: float):
                 fig_pico_por_trajeto(trajetos, float(rec["limiar_ms2"]),
                                      THRESH_MAG_ANTERIOR_MS2,
                                      float(otimo["limiar_ms2"]) if otimo else None),
-                use_container_width=True,
+                width="stretch",
             )
             st.markdown(
                 '<p class="secao-sub">Por que a sonolenta tem picos tão altos quanto a '
@@ -1171,7 +1184,7 @@ def render_tab_hibrido(normalizada, significancia, mapa_perfil):
                     "significância.", icon="ℹ️")
         else:
             variaveis, medias = calcular_discriminantes_por_perfil(normalizada, significancia, mapa_perfil)
-            st.plotly_chart(fig_barras_perfis(variaveis, medias), use_container_width=True)
+            st.plotly_chart(fig_barras_perfis(variaveis, medias), width="stretch")
 
     with col_conduta:
         resumo = carregar_resumo_uah()
@@ -1191,7 +1204,7 @@ def render_tab_hibrido(normalizada, significancia, mapa_perfil):
         else:
             eixos, medias_conduta = calcular_conduta_normalizada(resumo)
             st.plotly_chart(fig_barras_conduta(eixos, medias_conduta),
-                            use_container_width=True)
+                            width="stretch")
 
     st.markdown("<br>", unsafe_allow_html=True)
     st.markdown(_diagrama_transicoes_html(), unsafe_allow_html=True)

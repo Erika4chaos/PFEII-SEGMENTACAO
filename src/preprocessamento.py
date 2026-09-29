@@ -16,7 +16,10 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from sklearn.preprocessing import MinMaxScaler
+# scikit-learn e importado DENTRO das funcoes que os usam, nao no topo
+# do modulo: o dashboard importa este arquivo so por constantes e funcoes leves,
+# e nao deve depender das bibliotecas compiladas do scipy para abrir (em
+# Windows com Smart App Control, essas DLLs podem ser bloqueadas).
 
 COLUNAS_19 = [
     "total_veiculos", "pct_autonomos", "motorista_licenciado", "classe_risco",
@@ -254,6 +257,8 @@ def normalizar(df: pd.DataFrame) -> pd.DataFrame:
 
     for nome, codigo in zip(INDICADORAS_SINISTRO, (1, 2, 3)):
         df_norm[nome] = (df[COLUNA_NOMINAL] == codigo).astype(int)
+
+    from sklearn.preprocessing import MinMaxScaler
 
     scaler = MinMaxScaler()
     df_norm[COLUNAS_MODELO] = scaler.fit_transform(df_norm[COLUNAS_MODELO])

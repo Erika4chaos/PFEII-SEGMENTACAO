@@ -121,7 +121,10 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from scipy.stats import f_oneway
+# scipy/scikit-learn sao importados DENTRO das funcoes que os usam, nao no topo
+# do modulo: o dashboard importa este arquivo so por constantes e funcoes leves,
+# e nao deve depender das bibliotecas compiladas do scipy para abrir (em
+# Windows com Smart App Control, essas DLLs podem ser bloqueadas).
 
 G_MS2 = 9.80665  # 1 G em m/s^2
 CONFIG_FIRMWARE = (Path(__file__).resolve().parent.parent
@@ -746,6 +749,7 @@ def teste_permutacao_estratificado(df_resumo: pd.DataFrame, coluna: str,
         grupos = [g for g in grupos if len(g) > 0]
         if len(grupos) < 2:
             return np.nan
+        from scipy.stats import f_oneway
         return float(f_oneway(*grupos).statistic)
 
     rotulos_obs = conhecidos["comportamento"].to_numpy()
@@ -831,6 +835,7 @@ def validar_discriminacao(df_resumo: pd.DataFrame, coluna: str):
     grupos = [g for g in grupos if len(g) > 0]
     if len(grupos) < 2:
         return None
+    from scipy.stats import f_oneway
     return f_oneway(*grupos)
 
 
