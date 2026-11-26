@@ -429,19 +429,21 @@ def gerar_base(n: int, seed: int, pesos: dict, hoje: date | None = None,
             for i in range(n)]
 
 
-def relatorio_calibracao(base: list) -> str:
-    """Compara a base gerada com as marginais da amostra exploratoria real.
+def marginais_geradas(base: list) -> dict | None:
+    """Calcula, sobre uma base gerada, as mesmas grandezas da amostra
+    exploratoria real (MARGINAIS_OBSERVADAS).
 
-    Existe para que a aderencia seja VERIFICAVEL: sem esta saida, a afirmacao
-    de que a base sintetica reproduz as estatisticas observadas teria de ser
-    aceita sob palavra. Imprime tambem a taxa de ausencia efetiva, que e o que
-    exercita o tratamento de valores ausentes do pre-processamento.
+    Separada do relatorio para que duas pecas medam exatamente a mesma coisa:
+    o relatorio impresso ao final da geracao e a checagem entre sementes de
+    src/estabilidade.py. Nao altera a base -- so le.
+
+    Retorna None se nenhum registro tiver sinistralidade declarada positiva.
     """
     declarantes = [r for r in base
                    if r["sinistralidade"]["qst1"] or r["sinistralidade"]["qst2"]]
     n = len(declarantes)
     if n == 0:
-        return "Nenhum registro com sinistralidade declarada positiva."
+        return None
 
     q1 = sum(1 for r in declarantes if r["sinistralidade"]["qst1"]) / n
     q2 = sum(1 for r in declarantes if r["sinistralidade"]["qst2"]) / n
@@ -461,6 +463,25 @@ def relatorio_calibracao(base: list) -> str:
         for trecho in re.findall(r"Valor sinistro: R\$ ([\d\.]+,\d{2})",
                                  r["sinistralidade"]["qst3"] or ""):
             valores.append(float(trecho.replace(".", "").replace(",", ".")))
+
+    return {"n_declarantes": n, "qst1": q1, "qst2": q2, "ambos": ambos,
+            "valores_sinistro": valores}
+
+
+def relatorio_calibracao(base: list) -> str:
+    """Compara a base gerada com as marginais da amostra exploratoria real.
+
+    Existe para que a aderencia seja VERIFICAVEL: sem esta saida, a afirmacao
+    de que a base sintetica reproduz as estatisticas observadas teria de ser
+    aceita sob palavra. Imprime tambem a taxa de ausencia efetiva, que e o que
+    exercita o tratamento de valores ausentes do pre-processamento.
+    """
+    geradas = marginais_geradas(base)
+    if geradas is None:
+        return "Nenhum registro com sinistralidade declarada positiva."
+
+    q1, q2, ambos = geradas["qst1"], geradas["qst2"], geradas["ambos"]
+    valores = geradas["valores_sinistro"]
 
     obs = MARGINAIS_OBSERVADAS
     linhas = [

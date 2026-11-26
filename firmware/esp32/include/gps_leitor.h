@@ -19,6 +19,12 @@ public:
     float velocidadeKmh() const;       // usada na analise de comportamento
     uint32_t epocaAtual() const;  // segundos desde epoch (UTC) se houver fix; senao, tempo relativo
 
+    // Diagnostico de recepcao (nao e posicao): distingue "sem dado chegando"
+    // (fiacao RX/TX ou alimentacao) de "dado chega mas sem satelites" (antena
+    // ou ceu obstruido). Inline: so le contadores const do TinyGPS++.
+    uint32_t caracteresRecebidos() const { return _gps.charsProcessed(); }
+    uint32_t sentencasValidas() const { return _gps.passedChecksum(); }
+
 private:
     HardwareSerial _serial{2};
     // getters do TinyGPS++ (lat/lng/date/time) nao sao const -- eles limpam a

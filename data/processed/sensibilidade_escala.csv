@@ -1,0 +1,5 @@
+configuracao,n_colunas,silhouette,concordancia
+Min-Max sobre as variaveis do modelo (adotada),21,0.2151287749248063,0.9833333333333333
+Padronizacao por escore z,21,0.24486689679662343,0.9983333333333333
+Min-Max com metade do peso nas binarias,21,0.2529472556747988,0.9983333333333333
+Min-Max sem as indicadoras de tipo de sinistro,18,0.2345432042898133,0.9716666666666667

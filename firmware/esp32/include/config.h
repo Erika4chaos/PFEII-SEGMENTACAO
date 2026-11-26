@@ -17,6 +17,21 @@
 #define PINO_GPS_TX 17  // ESP32 TX2 -> RX do modulo GPS
 #define GPS_BAUD 9600
 
+// --- LEDs de status e botao de panico (Secao B.1) ---
+// Os 3 LEDs sao instrumentacao: tornam o estado do dispositivo headless visivel
+// na bancada e na demonstracao, sem depender do monitor serial. O LED CALIB tem
+// peso operacional (indica "pode andar" apos a calibracao). O botao de panico e
+// um acionamento manual do motorista (contexto de seguranca/roubo de carga).
+// Pinos realocados em 31/10/2026: os GPIO 25/26/27 ficaram inacessiveis na
+// montagem da protoboard (lado do ESP32 ocupado). Movidos para GPIO livres de
+// saida, sem funcao de strapping no boot (evitados D2/D15).
+#define PINO_LED_FIX       19   // aceso quando o GPS tem fix valido   (era 26)
+#define PINO_LED_EVENTO     4   // pisca a cada evento registrado      (era 25)
+#define PINO_LED_CALIB     18   // aceso apos uma calibracao confiavel (era 27)
+#define PINO_BOTAO_PANICO  32   // botao SOS -> GND (INPUT_PULLUP; 100 nF de debounce no hardware)
+#define LED_EVENTO_PULSO_MS 500 // duracao do pisca do LED de evento
+#define BOTAO_DEBOUNCE_MS   50  // janela de debounce do botao (complementa o capacitor)
+
 // --- Amostragem e filtragem (Secao B.2) ---
 // 50 Hz e bem acima do dobro da frequencia relevante de transientes de
 // frenagem/aceleracao brusca (poucos Hz), atendendo Nyquist com folga.
@@ -53,7 +68,7 @@
 // propria. Firmware, validacao e dashboard usam o mesmo limiar; para muda-lo,
 // edite so aqui e rode `python src/validacao_hardware.py` de novo.
 #define LIMIAR_MAGNITUDE_MS2 2.9f
-#define LIMIAR_JERK_MS3 20.0f               // limiar auxiliar sobre a derivada da magnitude
+#define LIMIAR_JERK_MS3 30.0f               // limiar auxiliar sobre a derivada da magnitude (31/10: 20->30 p/ reduzir disparo em manuseio de bancada)
 
 // Piso de magnitude exigido JUNTO do criterio de jerk.
 //
@@ -71,8 +86,26 @@
 // principal", mas precisa ser reconfirmado na bancada antes da coleta que for
 // para o texto: basta repetir os trancos manuais e ler a magnitude maxima no
 // serial (ver INTERVALO_RESUMO_DIAGNOSTICO_MS).
-#define PISO_MAGNITUDE_JERK_MS2 1.45f
+// RECONFIRMADO em 31/10/2026 na bancada: com a magnitude ja corrigida, o
+// manuseio da placa gerava eventos pelo jerk com magnitude de apenas ~1,6-1,8
+// m/s^2. Subir o piso de 1,45 para 2,0 corta esses falsos positivos sem mexer
+// no limiar principal (2,9) -- este piso e o jerk NAO sao lidos por
+// src/validacao_hardware.py, entao a validacao UAH continua inalterada.
+#define PISO_MAGNITUDE_JERK_MS2 2.0f
 #define INTERVALO_MIN_ENTRE_EVENTOS_MS 2000 // periodo refratario: evita contar a mesma manobra varias vezes
+
+// --- Persistencia do evento de magnitude (Secao B.3; correcao 11/11/2026) ---
+// Antes, UMA unica amostra acima do limiar ja virava evento. A 50 Hz isso faz
+// um impacto de buraco/junta ou um tranco da protoboard (pico de 1-2 amostras,
+// 20-40 ms, lido em 3,1-3,5 m/s2 no teste de rua) contar como conducao brusca,
+// inflando a taxa de eventos/min -- a variavel da analise comportamental. Uma
+// frenagem/aceleracao real se sustenta por centenas de ms, entao exigir que o
+// limiar seja cruzado por N amostras CONSECUTIVAS separa manobra de impacto.
+// Nao altera o limiar (2,9) nem e lido por src/validacao_hardware.py: a
+// validacao contra o UAH-DriveSet continua inalterada. O criterio de jerk
+// permanece sem persistencia (ele existe para pegar o pico curto que a media
+// movel suavizou). Reconfirmar N com o resumo [diag] do serial do trajeto.
+#define AMOSTRAS_MIN_EVENTO 5   // ~100 ms (5 x 20 ms) consecutivos acima do limiar
 
 // --- Sanidade da calibracao (Secao B.2) ---
 // Parado, a norma do vetor de aceleracao medido vale ~1 g. Fora desta faixa, a
@@ -92,6 +125,7 @@
 // --- Fila local / store-and-forward (Secao B.4) ---
 #define CAMINHO_FILA_EVENTOS "/fila_eventos.bin"
 #define CAMINHO_CURSOR_FILA "/fila_cursor.bin"
+#define CAMINHO_CONTADOR_EVENTOS "/fila_contador.bin"  // ultimo id atribuido, persistido: a contagem continua de onde parou ao religar
 #define MAX_EVENTOS_FILA 512  // poucos KB por viagem (24 bytes/evento) -- cabe folgado na flash interna
 
 // --- Rede confiavel (ex.: garagem/base de operacoes da transportadora) ---

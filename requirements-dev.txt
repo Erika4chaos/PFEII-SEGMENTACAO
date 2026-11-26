@@ -1,0 +1,5 @@
+# Dependencias de desenvolvimento: so para rodar os testes (python -m pytest).
+# O painel e o pipeline nao precisam delas -- por isso ficam fora do
+# requirements.txt, que e o arquivo lido na publicacao do dashboard.
+-r requirements.txt
+pytest>=7,<10

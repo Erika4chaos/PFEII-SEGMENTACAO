@@ -114,7 +114,8 @@ VARIAVEIS_NOMINAIS = {"tipo_sinistro_predominante"}
 
 ROTULO_VARIAVEL = {
     "total_veiculos": "Tamanho da frota",
-    "pct_autonomos": "% de autônomos/terceiros",
+    # autonomos / total_veiculos (Quadro 2): os terceiros NAO entram na conta.
+    "pct_autonomos": "% de autônomos",
     "motorista_licenciado": "Motorista licenciado",
     "classe_risco": "Classe de risco",
     "sinistralidade_rc_declarada": "Sinistralidade RC declarada",
@@ -289,16 +290,111 @@ def mapear_cluster_para_perfil(original: pd.DataFrame) -> dict:
     return mapa
 
 
-def calcular_kpis_por_cluster(original: pd.DataFrame, mapa_perfil: dict) -> pd.DataFrame:
-    kpis = original.groupby("cluster").agg(
-        premio_por_veiculo_medio=("premio_por_veiculo", "mean"),
-        lmi_por_veiculo_medio=("lmi_por_veiculo", "mean"),
-        valor_pago_historico_medio=("valor_pago_historico", "mean"),
-        taxa_referral=("referral_pendente", "mean"),
-        n_apolices=("numeroApolice", "count"),
-    ).reset_index()
-    kpis["perfil_numero"] = kpis["cluster"].map(mapa_perfil)
-    return kpis.sort_values("perfil_numero").reset_index(drop=True)
+def _resumo_grupo(grupo: pd.DataFrame) -> dict:
+    """Medias de um grupo de apolices no espaco original, com as mesmas
+    variaveis e a mesma ordem do Quadro 9 do Produto 5.2, mais as duas
+    medidas do custo pago que a media sozinha esconde.
+
+    `valor_pago_historico` tem mediana zero nos Perfis 2 e 3: a maior parte
+    das apolices nunca teve sinistro pago, e a media e puxada por poucas
+    apolices com valor alto. Por isso o custo aparece em tres medidas --
+    fracao de apolices com algum valor pago, mediana ENTRE ELAS e a media
+    (esta ultima so para casar com o Quadro 9).
+    """
+    pagos = grupo.loc[grupo["valor_pago_historico"] > 0, "valor_pago_historico"]
+    return {
+        "n_apolices": len(grupo),
+        "total_veiculos": grupo["total_veiculos"].mean(),
+        "pct_autonomos": grupo["pct_autonomos"].mean(),
+        "motorista_licenciado": grupo["motorista_licenciado"].mean(),
+        "classe_risco": grupo["classe_risco"].mean(),
+        "lmi_por_veiculo": grupo["lmi_por_veiculo"].mean(),
+        "premio_por_veiculo": grupo["premio_por_veiculo"].mean(),
+        "qt_coberturas_ativas": grupo["qt_coberturas_ativas"].mean(),
+        "agravo_aplicado": grupo["agravo_aplicado"].mean(),
+        "desconto_aplicado": grupo["desconto_aplicado"].mean(),
+        "fracao_com_pago": (grupo["valor_pago_historico"] > 0).mean(),
+        "mediana_pago_entre_pagos": float(pagos.median()) if len(pagos) else float("nan"),
+        "valor_pago_historico": grupo["valor_pago_historico"].mean(),
+        "sinistralidade_rc_declarada": grupo["sinistralidade_rc_declarada"].mean(),
+        "sinistralidade_rcfv_declarada": grupo["sinistralidade_rcfv_declarada"].mean(),
+        "referral_pendente": grupo["referral_pendente"].mean(),
+        "tempo_cotacao_emissao": grupo["tempo_cotacao_emissao"].mean(),
+        "parcelas_com_juros": grupo["parcelas_com_juros"].mean(),
+        "apolice_anterior": grupo["apolice_anterior"].mean(),
+    }
+
+
+def calcular_quadro_perfis(original: pd.DataFrame, mapa_perfil: dict) -> pd.DataFrame:
+    """Uma coluna por perfil (1, 2, 3) e uma para a carteira completa.
+
+    Indexado pelo NUMERO DO PERFIL, nunca pelo indice do cluster, que o
+    K-Means sorteia e pode mudar entre execucoes.
+    """
+    dados = original.assign(perfil_numero=original["cluster"].map(mapa_perfil))
+    colunas = {int(p): _resumo_grupo(g) for p, g in dados.groupby("perfil_numero")}
+    colunas = dict(sorted(colunas.items()))
+    colunas[CARTEIRA_COMPLETA] = _resumo_grupo(dados)
+    return pd.DataFrame(colunas)
+
+
+ORDEM_TIPO_SINISTRO = ["Tombamento", "Incêndio", "Terceiros", "Nenhum"]
+CODIGO_TIPO_SINISTRO = {1: "Tombamento", 2: "Incêndio", 3: "Terceiros", 0: "Nenhum"}
+# Tres categorias nominais + "nenhum" neutro. Hues fora da paleta de perfil
+# (vermelho/verde/ambar), para a cor de um tipo de sinistro nunca ser lida
+# como a cor de um perfil. Ordem validada com o validate_palette.js do
+# skill de dataviz (modo claro): todos os pares adjacentes passam na
+# separacao para daltonismo (pior dE 13,0). O rosa fica abaixo de 3:1 de
+# contraste, por isso cada segmento largo leva o percentual escrito e o
+# tooltip traz o valor.
+CORES_TIPO_SINISTRO = {
+    "Tombamento": "#2a78d6",
+    "Incêndio": "#e87ba4",
+    "Terceiros": "#6250d6",
+    "Nenhum": "#c7c9cc",
+}
+TEXTO_SOBRE_TIPO = {"Tombamento": "#ffffff", "Incêndio": "#1f2937",
+                    "Terceiros": "#ffffff", "Nenhum": "#1f2937"}
+
+
+def calcular_tipo_sinistro_por_perfil(original: pd.DataFrame, mapa_perfil: dict) -> pd.DataFrame:
+    """Percentual de apolices de cada perfil por tipo de sinistro
+    predominante (campo 'Tipo:' do qst3). Linhas: perfil; colunas: tipo."""
+    perfil = original["cluster"].map(mapa_perfil)
+    tipo = original["tipo_sinistro_predominante"].map(CODIGO_TIPO_SINISTRO)
+    tabela = pd.crosstab(perfil, tipo, normalize="index") * 100
+    return tabela.reindex(columns=ORDEM_TIPO_SINISTRO, fill_value=0.0)
+
+
+@st.cache_data
+def calcular_silhueta_por_perfil(normalizada: pd.DataFrame, mapa_perfil: dict) -> dict:
+    """Silhueta media de cada perfil e numero de apolices com silhueta
+    negativa, no mesmo espaco (COLUNAS_MODELO) em que o K-Means agrupou.
+
+    Calculada so com numpy (mesma razao do PCA abaixo: nao importar o
+    scikit-learn no painel). Conferida contra
+    sklearn.metrics.silhouette_samples: diferenca maxima de 1,6e-15.
+    """
+    X = normalizada[COLUNAS_MODELO].to_numpy(dtype=float)
+    rotulos = normalizada["cluster"].to_numpy()
+    quadrados = (X ** 2).sum(axis=1)
+    dist = np.sqrt(np.clip(quadrados[:, None] + quadrados[None, :] - 2 * X @ X.T, 0, None))
+    np.fill_diagonal(dist, 0.0)
+
+    clusters = np.unique(rotulos)
+    medias = np.stack([dist[:, rotulos == c].mean(axis=1) for c in clusters], axis=1)
+    tamanhos = np.array([(rotulos == c).sum() for c in clusters])
+    idx = np.searchsorted(clusters, rotulos)
+    # a(i): distancia media aos OUTROS membros do proprio cluster (exclui i).
+    a = medias[np.arange(len(X)), idx] * tamanhos[idx] / np.maximum(tamanhos[idx] - 1, 1)
+    medias[np.arange(len(X)), idx] = np.inf
+    b = medias.min(axis=1)
+    s = (b - a) / np.maximum(a, b)
+
+    por_perfil = {int(mapa_perfil[int(c)]): float(s[rotulos == c].mean()) for c in clusters}
+    return {"por_perfil": dict(sorted(por_perfil.items())),
+            "media": float(s.mean()),
+            "negativas": int((s < 0).sum())}
 
 
 def calcular_discriminantes_por_perfil(normalizada: pd.DataFrame, significancia: pd.DataFrame,
@@ -450,6 +546,8 @@ def aplicar_estilo():
         .styled-table th, .styled-table td { padding: 12px 15px; }
         .styled-table tbody tr { border-bottom: 1px solid #f3f4f6; }
         .styled-table tbody tr:nth-of-type(even) { background-color: #fafaf9; }
+        .tabela-perfis { table-layout: fixed; }
+        .tabela-perfis th, .tabela-perfis td { padding: 7px 15px; }
         .badge {
             padding: 4px 10px; border-radius: 999px; font-size: 11px;
             font-weight: 600; white-space: nowrap;
@@ -605,88 +703,203 @@ def render_escolha_de_k():
               f"{_br(100 * sens['concordancia'].max())}%")
     st.caption("A concordância mede se o pipeline reencontra os perfis usados na "
                "geração da base sintética. É teste de sanidade do pipeline, não "
-               "validação do método sobre dados reais.")
+               "validação do método sobre dados reais. Parte das variáveis contínuas "
+               "ocupa, no gerador, faixas exclusivas de um perfil (por exemplo, 15 a 90 "
+               "dias até a emissão só no referral), o que torna a base mais separável "
+               "do que se espera de dados de produção — ver Seção 4.1 do Produto 5.2.")
 
 
-def render_tab_software(projecao, kpis_cluster, gerais, variancia_pc):
+def _pct(valor: float) -> str:
+    return f"{_br(100 * valor, 0)}%"
+
+
+# Linhas da tabela de perfis, na ordem e com os rotulos do Quadro 9 do
+# Produto 5.2 -- o painel e o texto mostram os mesmos numeros, na mesma
+# ordem. (grupo, rotulo, chave em _resumo_grupo, formatador)
+LINHAS_QUADRO_PERFIS = [
+    ("Volumetria", "Apólices (n)", "n_apolices", _int_br),
+    ("Frota e atividade", "Veículos na frota (média)", "total_veiculos", lambda v: _br(v, 1)),
+    ("Frota e atividade", "Proporção de autônomos", "pct_autonomos", _pct),
+    ("Frota e atividade", "Motorista licenciado", "motorista_licenciado", _pct),
+    ("Frota e atividade", "Classe de risco da atividade (1 a 5)", "classe_risco", lambda v: _br(v, 2)),
+    ("Contrato", "LMI por veículo", "lmi_por_veiculo", _fmt_brl_compacto),
+    ("Contrato", "Prêmio por veículo", "premio_por_veiculo", _fmt_brl_compacto),
+    ("Contrato", "Coberturas opcionais ativas (de 8)", "qt_coberturas_ativas", lambda v: _br(v, 2)),
+    ("Contrato", "Agravo aplicado", "agravo_aplicado", _pct),
+    ("Contrato", "Desconto aplicado", "desconto_aplicado", _pct),
+    ("Sinistralidade declarada", "Apólices com algum valor pago", "fracao_com_pago", _pct),
+    ("Sinistralidade declarada", "Valor pago — mediana entre essas apólices",
+     "mediana_pago_entre_pagos", _fmt_brl_compacto),
+    ("Sinistralidade declarada", "Valor pago — média de todas as apólices*",
+     "valor_pago_historico", _fmt_brl_compacto),
+    ("Sinistralidade declarada", "Declarou reclamação de RC (qst1)", "sinistralidade_rc_declarada", _pct),
+    ("Sinistralidade declarada", "Declarou danos à frota (qst2)", "sinistralidade_rcfv_declarada", _pct),
+    ("Processo comercial", "Referral pendente", "referral_pendente", _pct),
+    ("Processo comercial", "Dias entre cotação e emissão (média)", "tempo_cotacao_emissao",
+     lambda v: _br(v, 1)),
+    ("Processo comercial", "Parcelamento com juros", "parcelas_com_juros", _pct),
+    ("Processo comercial", "Apólice anterior registrada", "apolice_anterior", _pct),
+]
+
+
+def _tabela_perfis_html(quadro: pd.DataFrame, perfil_sel: int | None) -> str:
+    """Tabela com uma coluna por perfil e uma para a carteira, linhas
+    agrupadas por tema. A coluna do perfil escolhido no filtro fica
+    destacada; as outras continuam visiveis, porque a leitura e comparativa."""
+    colunas = [c for c in quadro.columns if c != CARTEIRA_COMPLETA] + [CARTEIRA_COMPLETA]
+    destaque = "background-color:#f5f3ff;"
+
+    def estilo(coluna, base=""):
+        return f' style="{base}{destaque if coluna == perfil_sel else ""}"'
+
+    cabecalho = "<th>Variável</th>"
+    for c in colunas:
+        if c == CARTEIRA_COMPLETA:
+            cabecalho += f'<th style="text-align:right;">{CARTEIRA_COMPLETA}</th>'
+        else:
+            borda = f"border-top:4px solid {CORES_PERFIL[c]};"
+            cabecalho += (f"<th{estilo(c, borda + 'text-align:right;')}>"
+                          f"{NOME_CURTO[c]}</th>")
+
+    corpo, grupo_atual = "", None
+    for grupo, rotulo, chave, fmt in LINHAS_QUADRO_PERFIS:
+        if grupo != grupo_atual:
+            corpo += (f'<tr><td colspan="{len(colunas) + 1}" style="font-size:11px;'
+                      'font-weight:700;text-transform:uppercase;letter-spacing:0.05em;'
+                      f'color:#6d28d9;background:#faf5ff;padding:8px 15px;">{grupo}</td></tr>')
+            grupo_atual = grupo
+        corpo += f'<tr><td style="color:#374151;">{rotulo}</td>'
+        for c in colunas:
+            valor = quadro.loc[chave, c]
+            texto = "—" if pd.isna(valor) else fmt(valor)
+            corpo += f"<td{estilo(c, 'text-align:right;font-variant-numeric:tabular-nums;')}>{texto}</td>"
+        corpo += "</tr>"
+
+    corpo += ('<tr><td colspan="' + str(len(colunas) + 1) + '" style="font-size:11px;'
+              'font-weight:700;text-transform:uppercase;letter-spacing:0.05em;color:#6d28d9;'
+              'background:#faf5ff;padding:8px 15px;">Tratamento previsto</td></tr>')
+    corpo += '<tr><td style="color:#374151;">Ação via hardware (regra da Seção 3.4)</td>'
+    for c in colunas:
+        if c == CARTEIRA_COMPLETA:
+            corpo += '<td style="text-align:right;color:#9ca3af;">—</td>'
+        else:
+            corpo += (f"<td{estilo(c, 'text-align:right;')}><span class=\"badge "
+                      f"{CLASSE_BADGE[c]}\">{ACAO_HARDWARE[c]}</span></td>")
+    corpo += "</tr>"
+
+    # Tabela longa (19 linhas): celulas mais baixas que as da styled-table
+    # padrao e colunas de largura fixa, para os numeros alinharem por coluna.
+    return ('<table class="styled-table tabela-perfis"><colgroup><col style="width:31%">'
+            + "".join('<col style="width:17%">' for _ in colunas[:-1])
+            + '<col style="width:auto"></colgroup><thead><tr>' + cabecalho
+            + "</tr></thead><tbody>" + corpo + "</tbody></table>")
+
+
+def fig_tipo_sinistro(distribuicao: pd.DataFrame, perfil_sel: int | None) -> go.Figure:
+    """Barras 100% empilhadas: uma por perfil, segmentos por tipo de
+    sinistro predominante. Percentual escrito dentro do segmento so quando
+    ele e largo o bastante para o texto caber."""
+    perfis = [p for p in (3, 2, 1) if p in distribuicao.index]  # Perfil 1 no topo
+    rotulos = [NOME_CURTO[p] for p in perfis]
+    fig = go.Figure()
+    for tipo in ORDEM_TIPO_SINISTRO:
+        valores = [float(distribuicao.loc[p, tipo]) for p in perfis]
+        textos = [f"{_br(v, 0)}%" if v >= 12 else "" for v in valores]
+        opacidade = [1.0 if perfil_sel in (None, p) else 0.35 for p in perfis]
+        fig.add_trace(go.Bar(
+            y=rotulos, x=valores, name=tipo, orientation="h",
+            marker=dict(color=CORES_TIPO_SINISTRO[tipo], opacity=opacidade,
+                        line=dict(color="#faf5ff", width=2)),
+            text=textos, textposition="inside", insidetextanchor="middle",
+            textfont=dict(color=TEXTO_SOBRE_TIPO[tipo], size=12),
+            hovertemplate="%{y}<br>" + tipo + ": %{x:.1f}%<extra></extra>",
+        ))
+    fig.update_layout(
+        barmode="stack", bargap=0.35,
+        xaxis=dict(range=[0, 100], ticksuffix="%", gridcolor="#e5e7eb", zeroline=False,
+                   title=""),
+        yaxis=dict(title="", automargin=True),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0,
+                    title="", traceorder="normal"),
+    )
+    fig = _layout_plotly(fig, 230)
+    fig.update_layout(margin=dict(l=0, r=10, t=36, b=0))
+    return fig
+
+
+def render_tab_software(projecao, quadro, distribuicao_tipo, silhueta, variancia_pc):
     variancia_pct = sum(variancia_pc)
-    # Filtro por perfil: os quatro KPIs, a nuvem do PCA e a linha destacada da
-    # tabela respondem juntos a esta selecao, para analisar um perfil de cada vez.
-    perfis_disponiveis = sorted(int(n) for n in kpis_cluster["perfil_numero"])
+    # Filtro por perfil: os quatro KPIs, a coluna destacada da tabela, a barra
+    # de tipo de sinistro e a nuvem do PCA respondem juntos a esta selecao.
+    perfis_disponiveis = [int(c) for c in quadro.columns if c != CARTEIRA_COMPLETA]
     opcoes = [CARTEIRA_COMPLETA] + [NOME_CURTO[n] for n in perfis_disponiveis]
     escolha = st.pills("Analisar", opcoes, default=CARTEIRA_COMPLETA,
                        key="filtro_perfil") or CARTEIRA_COMPLETA
     perfil_sel = next((n for n in perfis_disponiveis if NOME_CURTO[n] == escolha), None)
 
-    if perfil_sel is None:
-        linha_p1 = kpis_cluster[kpis_cluster["perfil_numero"] == 1]
-        n_base, rotulo_base = gerais["n_apolices"], "Base analisada"
-        premio = gerais["premio_por_veiculo_medio"]
-        referral = gerais["taxa_referral"]
-        custo = float(linha_p1["valor_pago_historico_medio"].iloc[0]) if not linha_p1.empty else 0.0
-        rotulo_custo = "Custo pago médio (Perfil 1)"
-    else:
-        linha = kpis_cluster[kpis_cluster["perfil_numero"] == perfil_sel].iloc[0]
-        n_base, rotulo_base = linha["n_apolices"], f"Apólices do Perfil {perfil_sel}"
-        premio = linha["premio_por_veiculo_medio"]
-        referral = linha["taxa_referral"]
-        custo = linha["valor_pago_historico_medio"]
-        rotulo_custo = f"Custo pago médio (Perfil {perfil_sel})"
+    # Os quatro cartoes leem SEMPRE a mesma coluna: a carteira inteira ou o
+    # perfil escolhido. (Antes, em "Carteira completa", o cartao de custo
+    # mostrava o Perfil 1 enquanto os outros tres mostravam a carteira.)
+    coluna = CARTEIRA_COMPLETA if perfil_sel is None else perfil_sel
+    dados = quadro[coluna]
+    rotulo_base = "Base analisada" if perfil_sel is None else f"Apólices do Perfil {perfil_sel}"
 
     c1, c2, c3, c4 = st.columns(4)
-    _kpi_card(c1, "👥", rotulo_base, _int_br(n_base), "apólices")
-    _kpi_card(c2, "💰", "Prêmio médio/veículo", _fmt_brl_compacto(premio), "por ano")
-    _kpi_card(c3, "⏳", "Taxa de referral", f"{_br(100 * referral)}%")
-    # `valor_pago_historico` e a SOMA do que ja foi pago em sinistros da apolice
-    # (frota inteira, historico acumulado -- src/gerar_base_sintetica.py), nao o
-    # custo de um sinistro. O rotulo antigo "/sinistro" o fazia parecer dezenas
-    # de vezes o LMI por veiculo.
-    _kpi_card(c4, "⚠️", rotulo_custo, _fmt_brl_compacto(custo), "/apólice, acumulado")
+    _kpi_card(c1, "👥", rotulo_base, _int_br(dados["n_apolices"]), "apólices")
+    # Sem "por ano": a base nao define a duracao da vigencia.
+    _kpi_card(c2, "💰", "Prêmio médio/veículo", _fmt_brl_compacto(dados["premio_por_veiculo"]))
+    _kpi_card(c3, "⏳", "Taxa de referral", _pct(dados["referral_pendente"]))
+    mediana = dados["mediana_pago_entre_pagos"]
+    _kpi_card(c4, "⚠️", "Com sinistro pago", _pct(dados["fracao_com_pago"]),
+              "" if pd.isna(mediana) else f"mediana {_fmt_brl_compacto(mediana)}")
 
     st.markdown("<br>", unsafe_allow_html=True)
 
-    # A tabela vem primeiro e sozinha na largura total: ela e a resposta de
-    # negocio, e quem abre o painel abre por ela. A projecao PCA e metodologia
-    # -- mostra COMO os grupos se separam, nao QUAIS sao --, entao desceu para
-    # um bloco recolhido logo abaixo, disponivel para quem quiser auditar sem
-    # competir com a leitura principal.
+    # A tabela vem primeiro e na largura total: ela e a resposta de negocio.
+    # Mesmas linhas, mesma ordem e mesmos numeros do Quadro 9 do Produto 5.2.
     _titulo_secao(
         "Três perfis, três tratamentos comerciais",
-        "Médias no espaço original de cada perfil. A coluna de ação via hardware "
-        "é a regra de negócio da Seção 3.4 (o dispositivo como agravo, "
-        "fidelização ou condição de emissão), não um valor calculado.",
+        "Médias no espaço original, por perfil e para a carteira (mesmos números do "
+        "Quadro 9). A ação via hardware é a regra de negócio da Seção 3.4 — o "
+        "dispositivo como agravo, fidelização ou condição de emissão —, não um valor "
+        "calculado.",
     )
-    linhas = ""
-    for _, linha in kpis_cluster.iterrows():
-        perfil = int(linha["perfil_numero"])
-        destaque = (' style="background-color:#f5f3ff;box-shadow:inset 4px 0 0 #7c3aed;"'
-                    if perfil == perfil_sel else "")
-        linhas += (
-            f"<tr{destaque}>"
-            f'<td style="font-weight:600;color:#1f2937;">{NOME_CURTO[perfil]}</td>'
-            f'<td>{_int_br(linha["n_apolices"])} apólices</td>'
-            f'<td>{_fmt_brl_compacto(linha["lmi_por_veiculo_medio"])}</td>'
-            f'<td>{_fmt_brl_compacto(linha["premio_por_veiculo_medio"])}</td>'
-            f'<td style="font-weight:600;color:#1f2937;">'
-            f'{_fmt_brl_compacto(linha["valor_pago_historico_medio"])}</td>'
-            f'<td><span class="badge {CLASSE_BADGE[perfil]}">{ACAO_HARDWARE[perfil]}</span></td>'
-            "</tr>"
-        )
     st.markdown(
-        '<table class="styled-table"><thead><tr>'
-        "<th>Perfil identificado</th><th>Volumetria</th><th>LMI médio/veíc.</th>"
-        "<th>Prêmio médio/veíc.</th><th>Custo pago/apólice*</th><th>Ação via hardware</th>"
-        "</tr></thead><tbody>" + linhas + "</tbody></table>"
-        '<p class="secao-sub" style="margin-top:8px;">* Soma histórica do que foi '
-        "pago em sinistros por apólice (frota inteira, todos os anos declarados) — "
-        "não é o custo de um sinistro, por isso pode superar o LMI por veículo.</p>",
+        _tabela_perfis_html(quadro, perfil_sel)
+        + '<p class="secao-sub" style="margin-top:8px;">* O valor pago é a soma histórica '
+        "do que seguradoras anteriores pagaram em sinistros da apólice (frota inteira, "
+        "todos os anos declarados no qst3) — não é o custo de um sinistro, e por isso "
+        "pode superar o LMI por veículo. Nos Perfis 2 e 3 a maioria das apólices não tem "
+        "valor pago, e a média de todas fica muito abaixo do valor típico de quem tem; "
+        "por isso a mediana entre as apólices com valor pago vem antes da média.</p>",
         unsafe_allow_html=True,
     )
+
+    st.markdown("<br>", unsafe_allow_html=True)
+    _titulo_secao(
+        "Tipo de sinistro predominante declarado, por perfil",
+        "Proporção das apólices de cada perfil pelo tipo citado no campo “Tipo:” do "
+        "qst3. “Nenhum” é a apólice sem sinistro tipificado no histórico declarado.",
+    )
+    st.plotly_chart(fig_tipo_sinistro(distribuicao_tipo, perfil_sel), width="stretch")
 
     st.markdown("<br>", unsafe_allow_html=True)
 
     with st.expander("Como o modelo foi calibrado e o quanto o resultado é estável (metodologia)"):
         render_escolha_de_k()
+
+        st.markdown("<br>", unsafe_allow_html=True)
+        _titulo_secao(
+            "O perfil de referral é o menos coeso — e é isso que o define",
+            f"Silhueta média de cada perfil no espaço do modelo (média geral "
+            f"{_br(silhueta['media'], 3)}). {silhueta['negativas']} das "
+            f"{_int_br(len(projecao))} apólices têm silhueta negativa, isto é, estão em "
+            "média mais perto de outro grupo que do próprio.",
+        )
+        colunas_sil = st.columns(len(silhueta["por_perfil"]))
+        for col, (perfil, valor) in zip(colunas_sil, silhueta["por_perfil"].items()):
+            _kpi_card(col, "📐", NOME_CURTO[perfil], _br(valor, 3), "silhueta")
+
         st.markdown("<br>", unsafe_allow_html=True)
         _titulo_secao(
             "Os grupos se separam no espaço do modelo",
@@ -694,17 +907,24 @@ def render_tab_software(projecao, kpis_cluster, gerais, variancia_pc):
             f"(as {len(COLUNAS_19)} do Quadro 2, menos a nominal, mais as 3 indicadoras) "
             f"para visualização espacial dos 3 clusters. Os dois componentes "
             f"explicam {_br(100 * variancia_pct)}% da variância. A projeção é apenas "
-            f"visualização — nunca entra no treino.",
+            f"visualização — nunca entra no treino. Passe o cursor sobre um ponto para "
+            f"ver a apólice.",
         )
         fig = px.scatter(
             projecao, x="PCA1", y="PCA2", color="perfil_curto",
             color_discrete_map={NOME_CURTO[n]: CORES_PERFIL[n] for n in NOME_CURTO},
             category_orders={"perfil_curto": [NOME_CURTO[n] for n in (1, 2, 3)]},
-            custom_data=["numeroApolice"],
+            custom_data=["numeroApolice", "perfil_curto", "tt_frota", "tt_autonomos",
+                         "tt_referral", "tt_dias", "tt_pago"],
         )
         fig.update_traces(
             marker=dict(size=9, opacity=0.8),
-            hovertemplate="Apólice %{customdata[0]}<extra></extra>",
+            hovertemplate=(
+                "<b>Apólice %{customdata[0]}</b><br>%{customdata[1]}<br>"
+                "Frota: %{customdata[2]} veículos · autônomos %{customdata[3]}<br>"
+                "Referral pendente: %{customdata[4]} · %{customdata[5]} dias até a emissão<br>"
+                "Valor pago histórico: %{customdata[6]}<extra></extra>"
+            ),
         )
         # Com um perfil escolhido, os outros dois ficam de fundo em vez de sumir:
         # a posicao relativa das nuvens e metade da leitura da figura.
@@ -1181,19 +1401,37 @@ def render_tab_hibrido(normalizada, significancia, mapa_perfil):
     col_perfis, col_conduta = st.columns([1, 1])
 
     with col_perfis:
-        _titulo_secao(
-            "A composição da frota separa mais que o histórico financeiro",
-            "As 6 variáveis com maior tamanho de efeito (η² para contínuas, V de "
-            "Cramér para categóricas), da mais discriminante para a menos, na média "
-            "normalizada Min-Max do próprio K-Means reescalada a 0–100. São dados "
-            "declaratórios e históricos da Parte A — nenhuma leitura de telemetria "
-            "entra aqui. A ordenação é o ranking: a barra de cima é a variável que "
-            "mais separa a carteira.",
-        )
         if significancia is None or significancia.empty:
+            _titulo_secao("Variáveis que mais separam os perfis", "")
             st.info("Rode `python src/perfilamento.py` para gerar os testes de "
                     "significância.", icon="ℹ️")
         else:
+            # A variavel nominal sai da figura (a media de um codigo nao tem
+            # leitura de magnitude). O subtitulo diz QUAL saiu e em que posicao
+            # do ranking ela estava, para "as 6 de maior efeito" nao virar uma
+            # afirmacao falsa.
+            ranking = significancia.sort_values("tamanho_efeito", ascending=False,
+                                                ignore_index=True)
+            excluidas = [
+                f"{ROTULO_VARIAVEL.get(v, v).lower()} ({i + 1}ª no ranking, "
+                f"{'V' if m == 'V de Cramer' else 'η²'} = {_br(e, 3)})"
+                for i, (v, m, e) in enumerate(zip(ranking["variavel"], ranking["medida"],
+                                                  ranking["tamanho_efeito"]))
+                if v in VARIAVEIS_NOMINAIS and i < 6 + len(VARIAVEIS_NOMINAIS)
+            ]
+            nota_excluidas = (
+                f" Fica fora da figura, por ser nominal, {', '.join(excluidas)}: a média "
+                "de um código não tem leitura de “mais” ou “menos”." if excluidas else "")
+            _titulo_secao(
+                "Na base sintética, a composição da frota separa mais que o histórico financeiro",
+                "As 6 variáveis não nominais com maior tamanho de efeito (η² para "
+                "contínuas, V de Cramér para categóricas), da mais discriminante para a "
+                "menos, na média normalizada Min-Max do próprio K-Means reescalada a 0–100."
+                + nota_excluidas +
+                " São dados declaratórios e históricos da Parte A — nenhuma leitura de "
+                "telemetria entra aqui. O ranking reflete a base sintética; confirmá-lo "
+                "depende da carteira real.",
+            )
             variaveis, medias = calcular_discriminantes_por_perfil(normalizada, significancia, mapa_perfil)
             st.plotly_chart(fig_barras_perfis(variaveis, medias), width="stretch")
 
@@ -1277,17 +1515,30 @@ def main():
 
     normalizada, original = carregar_dados()
     mapa_perfil = mapear_cluster_para_perfil(original)
-    kpis_cluster = calcular_kpis_por_cluster(original, mapa_perfil)
+    quadro_perfis = calcular_quadro_perfis(original, mapa_perfil)
+    distribuicao_tipo = calcular_tipo_sinistro_por_perfil(original, mapa_perfil)
+    silhueta = calcular_silhueta_por_perfil(normalizada, mapa_perfil)
     significancia = carregar_significancia()
-    gerais = {
-        "n_apolices": len(original),
-        "premio_por_veiculo_medio": original["premio_por_veiculo"].mean(),
-        "taxa_referral": original["referral_pendente"].mean(),
-    }
 
     projecao, variancia_pct = projetar_pca(normalizada)
     projecao["perfil_numero"] = projecao["cluster"].map(mapa_perfil)
     projecao["perfil_curto"] = projecao["perfil_numero"].map(NOME_CURTO)
+    # Campos do tooltip do PCA, no espaco ORIGINAL (unidades reais), ja
+    # formatados em portugues. A projecao vem da matriz normalizada; a juncao
+    # e pela chave numeroApolice, nunca pela posicao da linha.
+    tooltip = original[["numeroApolice", "total_veiculos", "pct_autonomos",
+                        "referral_pendente", "tempo_cotacao_emissao",
+                        "valor_pago_historico"]].copy()
+    tooltip["tt_frota"] = tooltip["total_veiculos"].map(lambda v: _int_br(round(v)))
+    tooltip["tt_autonomos"] = tooltip["pct_autonomos"].map(_pct)
+    tooltip["tt_referral"] = tooltip["referral_pendente"].map(lambda v: "sim" if v >= 0.5 else "não")
+    tooltip["tt_dias"] = tooltip["tempo_cotacao_emissao"].map(lambda v: _int_br(round(v)))
+    tooltip["tt_pago"] = tooltip["valor_pago_historico"].map(
+        lambda v: "nenhum" if v <= 0 else _fmt_brl_compacto(v))
+    projecao = projecao.merge(
+        tooltip[["numeroApolice", "tt_frota", "tt_autonomos", "tt_referral",
+                 "tt_dias", "tt_pago"]],
+        on="numeroApolice", how="left", validate="one_to_one")
 
     # Ideia central (Knaflic, "Storytelling with Data"): uma unica frase
     # declarativa antes das abas, dizendo o que o painel AFIRMA -- e nao o que
@@ -1317,7 +1568,8 @@ def main():
         "⚡ Onde as duas camadas se encontram",
     ])
     with aba_software:
-        render_tab_software(projecao, kpis_cluster, gerais, variancia_pct)
+        render_tab_software(projecao, quadro_perfis, distribuicao_tipo, silhueta,
+                            variancia_pct)
     with aba_hardware:
         render_tab_hardware(THRESH_MAG_MS2)
     with aba_hibrido:

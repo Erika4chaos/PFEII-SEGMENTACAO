@@ -37,7 +37,12 @@ struct AmostraFiltrada {
 class SensorAceleracao {
 public:
     bool iniciar();
-    void calibrar();
+    // Calibra o offset de gravidade (bloqueante, ~AMOSTRAS_CALIBRACAO x
+    // INTERVALO_AMOSTRA_MS). 'aoAmostrar', se fornecido, e chamado a cada
+    // amostra com o indice (0..AMOSTRAS_CALIBRACAO-1) -- usado pelo main para
+    // piscar o LED de calibracao enquanto amostra, sem acoplar o sensor ao
+    // hardware de LED.
+    void calibrar(void (*aoAmostrar)(int) = nullptr);
     bool atualizar();  // retorna true quando uma nova amostra filtrada fica pronta
     AmostraFiltrada ultimaAmostra() const { return _ultima; }
 

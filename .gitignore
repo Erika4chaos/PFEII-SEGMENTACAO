@@ -10,3 +10,8 @@ __pycache__/
 # project) -- only the small RAW_ACCELEROMETERS/RAW_GPS/etc. text files
 # extracted under data/raw/uah-driveset/ are tracked.
 data/raw/UAH-DRIVESET-v1.zip
+
+# Backups locais e saidas de documentos (monografia .docx, apresentacoes .pptx):
+# mantidos fora do repositorio de codigo.
+backup_*/
+Claude outputs/

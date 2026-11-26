@@ -40,7 +40,7 @@ void SensorAceleracao::aplicarMediaMovel(float ax, float ay, float az,
     fz = somaZ / _amostrasNoBuffer;
 }
 
-void SensorAceleracao::calibrar() {
+void SensorAceleracao::calibrar(void (*aoAmostrar)(int)) {
     // Calibracao unica na instalacao (Secao B.2): estima o VETOR de gravidade
     // -- a orientacao em que o dispositivo ficou montado -- pela media de cada
     // eixo com o veiculo parado. Substitui a fusao com giroscopio, que este
@@ -53,6 +53,7 @@ void SensorAceleracao::calibrar() {
         somaX += fx;
         somaY += fy;
         somaZ += fz;
+        if (aoAmostrar) aoAmostrar(i);  // feedback visual (ex.: piscar LED) durante a calibracao
         delay(INTERVALO_AMOSTRA_MS);
     }
     _offsetX_g = somaX / AMOSTRAS_CALIBRACAO;

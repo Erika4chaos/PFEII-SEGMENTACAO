@@ -78,25 +78,35 @@ void DisplayStatus::desenhar(uint32_t totalEventos, float ultimaMagnitude_ms2,
     escreverADireita(linha, 10);
     tela.drawHLine(0, 13, 128);
 
-    // Corpo: a taxa primeiro, por ser a variavel da analise.
-    snprintf(linha, sizeof(linha), "TAXA    %.1f /min", taxaPorMinuto);
-    tela.drawStr(0, 27, linha);
+    // Corpo: os NUMEROS que os LEDs nao conseguem mostrar. Os LEDs ja cobrem os
+    // estados binarios (verde=calibrado, amarelo=fix, vermelho=evento agora),
+    // entao o OLED nao repete isso -- mostra as grandezas. Valores alinhados numa
+    // coluna fixa (x=54) para leitura rapida. EVENTOS (total) primeiro.
+    const int COL_VALOR = 54;
 
-    snprintf(linha, sizeof(linha), "EVENTOS %lu", (unsigned long)totalEventos);
-    tela.drawStr(0, 39, linha);
+    tela.drawStr(0, 27, "EVENTOS");
+    snprintf(linha, sizeof(linha), "%lu", (unsigned long)totalEventos);
+    tela.drawStr(COL_VALOR, 27, linha);
 
+    // TAXA: eventos por minuto -- a variavel da analise comportamental.
+    tela.drawStr(0, 39, "TAXA");
+    snprintf(linha, sizeof(linha), "%.1f /min", taxaPorMinuto);
+    tela.drawStr(COL_VALOR, 39, linha);
+
+    // ULTIMO: intensidade (magnitude) do evento mais recente.
+    tela.drawStr(0, 51, "ULTIMO");
     if (totalEventos > 0) {
-        snprintf(linha, sizeof(linha), "ULTIMO  %.1f m/s2", ultimaMagnitude_ms2);
+        snprintf(linha, sizeof(linha), "%.1f m/s2", ultimaMagnitude_ms2);
     } else {
-        snprintf(linha, sizeof(linha), "ULTIMO  --");
+        snprintf(linha, sizeof(linha), "--");
     }
-    tela.drawStr(0, 51, linha);
+    tela.drawStr(COL_VALOR, 51, linha);
 
-    // Rodape: fila do store-and-forward e velocidade (esta sim entra na
-    // analise; ver a coluna de velocidade do RAW_GPS e o marcador de
-    // trecho acima de 50 km/h no UAH-DriveSet).
+    // Rodape: fila do store-and-forward (nao tem LED proprio -- so se ve aqui) e
+    // velocidade do GPS (tambem entra na analise; marcador de trecho acima de
+    // 50 km/h no UAH-DriveSet).
     tela.drawHLine(0, 54, 128);
-    snprintf(linha, sizeof(linha), "FILA %u", (unsigned)pendentesNaFila);
+    snprintf(linha, sizeof(linha), "A ENVIAR %u", (unsigned)pendentesNaFila);
     tela.drawStr(0, 64, linha);
 
     if (gpsValido) {

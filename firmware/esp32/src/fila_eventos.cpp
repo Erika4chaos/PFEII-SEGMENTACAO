@@ -10,6 +10,7 @@ bool FilaEventos::iniciar() {
         return false;
     }
     carregarCursor();
+    carregarContador();
     return true;
 }
 
@@ -30,10 +31,39 @@ void FilaEventos::salvarCursor() {
     }
 }
 
-bool FilaEventos::salvar(const EventoTelemetria &evento) {
+void FilaEventos::carregarContador() {
+    _contadorEventos = 0;
+    File f = LittleFS.open(CAMINHO_CONTADOR_EVENTOS, "r");
+    if (f) {
+        f.read(reinterpret_cast<uint8_t *>(&_contadorEventos), sizeof(_contadorEventos));
+        f.close();
+    }
+}
+
+void FilaEventos::salvarContador() {
+    File f = LittleFS.open(CAMINHO_CONTADOR_EVENTOS, "w");
+    if (f) {
+        f.write(reinterpret_cast<const uint8_t *>(&_contadorEventos), sizeof(_contadorEventos));
+        f.close();
+    }
+}
+
+bool FilaEventos::salvar(EventoTelemetria &evento) {
     if (quantidade() >= MAX_EVENTOS_FILA) {
         return false;  // fila cheia: o chamador decide como reportar/descartar
     }
+
+    // Reserva e PERSISTE o proximo id ANTES de gravar o evento. A ordem e
+    // deliberada: se faltar energia entre as duas escritas, perde-se no maximo
+    // um NUMERO de id (uma lacuna na sequencia, inofensiva para a deduplicacao
+    // na nuvem), e nunca um id repetido -- que faria a nuvem tratar um evento
+    // novo como duplicata e descarta-lo. E o que mantem a contagem continua
+    // mesmo que o dispositivo seja desligado e religado (store-and-forward).
+    uint32_t idReservado = _contadorEventos + 1;
+    _contadorEventos = idReservado;
+    salvarContador();
+    evento.id = idReservado;
+
     File f = LittleFS.open(CAMINHO_FILA_EVENTOS, "a");
     if (!f) {
         return false;
@@ -79,4 +109,15 @@ void FilaEventos::limparSeDrenada() {
         _cursor = 0;
         salvarCursor();
     }
+}
+
+void FilaEventos::zerar() {
+    // Remove os tres arquivos de estado (fila, cursor e contador). Ausentes,
+    // iniciar() os recarrega como 0 no proximo boot -- e aqui ja zeramos o
+    // estado em memoria para o efeito valer na mesma sessao, sem reiniciar.
+    LittleFS.remove(CAMINHO_FILA_EVENTOS);
+    LittleFS.remove(CAMINHO_CURSOR_FILA);
+    LittleFS.remove(CAMINHO_CONTADOR_EVENTOS);
+    _cursor = 0;
+    _contadorEventos = 0;
 }
